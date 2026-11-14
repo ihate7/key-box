@@ -1,0 +1,15 @@
+# Результаты сборки и тестов
+dist/
+tests/out/
+
+# Visual Studio и Rider
+bin/
+obj/
+.vs/
+.idea/
+*.user
+
+# Хранилища паролей никогда не должны попасть в репозиторий
+*.vault
+*.vault.bak
+*.vault.tmp

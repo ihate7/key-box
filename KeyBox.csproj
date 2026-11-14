@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Проект для работы в Visual Studio или Rider: подсказки по коду, отладка.
+  Основной способ сборки — build.cmd: ему не нужно ничего, кроме самой Windows.
+-->
+<Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{7B0C1E4A-5D2F-4E8B-9A36-2F1C8D4E6B90}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>KeyBox</RootNamespace>
+    <AssemblyName>KeyBox</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <!-- Код должен собираться и компилятором из состава Windows (build.cmd), а он понимает C# 5. -->
+    <LangVersion>5</LangVersion>
+    <StartupObject>KeyBox.Program</StartupObject>
+    <ApplicationIcon>res\app.ico</ApplicationIcon>
+    <ApplicationManifest>res\app.manifest</ApplicationManifest>
+    <Prefer32Bit>false</Prefer32Bit>
+    <CodePage>65001</CodePage>
+    <FileAlignment>512</FileAlignment>
+    <WarningLevel>4</WarningLevel>
+    <!-- Атрибут целевой платформы уже указан в src\Properties\AssemblyInfo.cs. -->
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <OutputPath>bin\Debug\</OutputPath>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <OutputPath>bin\Release\</OutputPath>
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <DefineConstants>TRACE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="res\app.ico">
+      <LogicalName>KeyBox.app.ico</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="res\logo.png">
+      <LogicalName>KeyBox.logo.png</LogicalName>
+    </EmbeddedResource>
+    <None Include="res\app.manifest" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

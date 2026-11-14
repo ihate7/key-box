@@ -1,0 +1,1811 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+using KeyBox.UI;
+using KeyBox.Vault;
+using FormsTimer = System.Windows.Forms.Timer;
+
+namespace KeyBox.Tests
+{
+    /// <summary>
+    /// Сквозная проверка интерфейса. Тест запускает настоящие окна программы внутри
+    /// своего процесса и работает с ними как пользователь: нажимает кнопки, заполняет
+    /// поля, отвечает на вопросы. Окна открываются за краем экрана и не перехватывают
+    /// фокус, поэтому прогон не мешает работе за компьютером.
+    ///
+    ///   UiTests.exe &lt;рабочая папка&gt; [--visible] [--scale 1.5]
+    ///
+    /// В рабочей папке создаётся тестовое хранилище, в подпапке shots — снимки окон.
+    /// С ключом --visible окна показываются на экране (для снимков «как есть»),
+    /// ключ --scale имитирует масштаб экрана 150 %, 200 % и т. п.
+    /// </summary>
+    internal static class UiTests
+    {
+        private const string MasterPassword = "верный мастер-пароль";
+        private const string NewMasterPassword = "совсем другой пароль 2";
+
+        private static readonly string Mask = new string((char)0x2022, 8);
+        private static readonly HashSet<Form> driven = new HashSet<Form>();
+
+        private static string workDir;
+        private static string shotDir;
+        private static string vaultPath;
+        private static bool visible;
+        private static int passed;
+        private static int failed;
+        private static int skipped;
+        private static Exception asyncFailure;
+
+        private static VaultSession session;
+        private static MainForm main;
+
+        [STAThread]
+        private static int Main(string[] args)
+        {
+            try
+            {
+                Console.OutputEncoding = new UTF8Encoding(false);
+            }
+            catch (IOException)
+            {
+                // нет консоли (режим --clipboard-child) — вывод всё равно уйдёт в файл отчёта
+            }
+            if (args.Length == 0)
+            {
+                Console.WriteLine("usage: UiTests <work-dir> [--visible]");
+                return 2;
+            }
+
+            workDir = Path.GetFullPath(args[0]);
+            Directory.CreateDirectory(workDir);
+            visible = Array.IndexOf(args, "--visible") >= 0;
+            bool clipboardChild = Array.IndexOf(args, "--clipboard-child") >= 0;
+
+            // Страховка: зависший диалог не должен подвесить прогон навсегда.
+            var watchdog = new Thread(delegate()
+            {
+                Thread.Sleep(240000);
+                Console.WriteLine("TIMEOUT: the UI test run did not finish in time");
+                Environment.Exit(3);
+            });
+            watchdog.IsBackground = true;
+            watchdog.Start();
+
+            if (clipboardChild)
+            {
+                return ClipboardChild();
+            }
+
+            // Проверка буфера обмена идёт в отдельном процессе на изолированной оконной станции.
+            // Запускаем её первой, пока у этого процесса ещё нет ни одного окна.
+            ClipboardInIsolation();
+
+            float scale = 1f;
+            int scaleIndex = Array.IndexOf(args, "--scale");
+            if (scaleIndex >= 0 && scaleIndex + 1 < args.Length)
+            {
+                scale = float.Parse(args[scaleIndex + 1], System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            shotDir = Path.Combine(workDir, visible ? "shots-visible" : (scale == 1f ? "shots" : "shots-" + (int)(scale * 100)));
+            Directory.CreateDirectory(shotDir);
+            vaultPath = Path.Combine(workDir, "ui-test.vault");
+            CleanUp();
+
+            InitializeForms();
+            if (scale != 1f) SimulateScale(scale);
+            Ui.NoActivate = true;
+            if (!visible) Ui.TestOrigin = new Point(-30000, -30000);
+            Console.WriteLine("screen scale: {0:P0}, glyph font: {1}", Ui.Scale, Ui.HasGlyphs ? "yes" : "no");
+
+            Run("icons are drawn at every size", IconsAtEverySize);
+            Run("create a vault: validation, then creation", CreateVault);
+            Run("main window of an empty vault", EmptyMainWindow);
+            Run("groups: create, validate, order", CreateGroups);
+            Run("entries: create, validate, generate a password", CreateEntries);
+            Run("groups: filter and counters", FilterByGroup);
+            Run("entries: edit, including the group", EditEntry);
+            Run("move between groups: the 'to group' menu", MoveByMenu);
+            Run("move between groups: drag and drop", MoveByDragDrop);
+            Run("search", Search);
+            Run("show passwords and sorting", ShowPasswordsAndSort);
+            Run("keyboard shortcuts", Shortcuts);
+            Run("entries: delete with confirmation", DeleteEntry);
+            Run("groups: rename and delete", RenameAndDeleteGroup);
+            Run("long texts do not break the layout", LongTexts);
+            Run("about box", About);
+            Run("failed save is reported and can be retried", SaveFailure);
+            Run("every change is already on disk", Persistence);
+            Run("lock closes the window", Lock);
+            Run("unlock: wrong password, then the right one", Unlock);
+            Run("change the master password", ChangeMasterPassword);
+            Run("auto-lock also closes open dialogs", AutoLock);
+
+            if (main != null && !main.IsDisposed) main.Close();
+            if (session != null) session.Dispose();
+
+            Console.WriteLine();
+            Console.WriteLine("{0} passed, {1} failed{2}", passed, failed, skipped > 0 ? ", " + skipped + " skipped" : "");
+            Console.WriteLine("screenshots: " + shotDir);
+            return failed == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// Имитация крупного масштаба экрана (150 %, 200 %) на обычном мониторе: подменяет
+        /// коэффициент масштаба и шрифты программы до создания первого окна. Системные элементы
+        /// (заголовок окна, полосы прокрутки) остаются прежнего размера, но раскладка содержимого
+        /// ведёт себя так же, как при настоящем масштабе.
+        /// </summary>
+        private static void SimulateScale(float scale)
+        {
+            System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(Ui).TypeHandle);
+            foreach (string name in new[] { "Font", "BoldFont", "SmallFont", "TitleFont", "MonoFont", "GlyphFont" })
+            {
+                FieldInfo field = typeof(Ui).GetField(name, BindingFlags.Static | BindingFlags.Public);
+                var font = (Font)field.GetValue(null);
+                if (font != null) field.SetValue(null, new Font(font.FontFamily, font.SizeInPoints * scale, font.Style));
+            }
+            typeof(Ui).GetField("Scale", BindingFlags.Static | BindingFlags.Public).SetValue(null, Ui.Scale * scale);
+        }
+
+        private static void InitializeForms()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { asyncFailure = e.Exception; };
+        }
+
+        private static void CleanUp()
+        {
+            foreach (string file in new[] { vaultPath, vaultPath + ".bak", vaultPath + ".tmp" })
+            {
+                if (Directory.Exists(file)) Directory.Delete(file, true);
+                if (File.Exists(file)) File.Delete(file);
+            }
+        }
+
+        // =====================================================================
+        //  Буфер обмена — на изолированной оконной станции
+        // =====================================================================
+
+        /// <summary>Запускает этот же тест в режиме --clipboard-child на отдельной оконной станции.</summary>
+        private static void ClipboardInIsolation()
+        {
+            string report = Path.Combine(workDir, "clipboard-report.txt");
+            if (File.Exists(report)) File.Delete(report);
+
+            string exe = Assembly.GetExecutingAssembly().Location;
+            string command = "\"" + exe + "\" \"" + workDir + "\" --clipboard-child";
+            try
+            {
+                int exitCode = IsolatedDesktop.Run(command, 120000);
+                string[] lines = File.Exists(report) ? File.ReadAllLines(report, Encoding.UTF8) : new string[0];
+                foreach (string line in lines)
+                {
+                    Console.WriteLine(line);
+                    if (line.StartsWith("ok ")) passed++;
+                    if (line.StartsWith("FAIL")) failed++;
+                }
+                if (exitCode != 0 && lines.Length == 0)
+                {
+                    failed++;
+                    Console.WriteLine("FAIL  clipboard checks: the isolated process exited with code " + exitCode + " and left no report");
+                }
+            }
+            catch (Exception ex)
+            {
+                // Нет прав на создание оконной станции и т. п. Свой буфер обмена ради теста не трогаем.
+                skipped++;
+                Console.WriteLine("skip  clipboard checks: no isolated desktop (" + ex.GetType().Name + ": " + ex.Message + ")");
+            }
+        }
+
+        /// <summary>
+        /// Работает внутри изолированной оконной станции: там свой, пустой буфер обмена.
+        /// Модальные окна на такой станции Windows Forms показывать не разрешает, поэтому
+        /// данные готовятся напрямую, а в окне нажимаются только кнопки копирования.
+        /// </summary>
+        private static int ClipboardChild()
+        {
+            using (var report = new StreamWriter(Path.Combine(workDir, "clipboard-report.txt"), false, new UTF8Encoding(false)))
+            {
+                report.AutoFlush = true;
+                Console.SetOut(report);
+                try
+                {
+                    InitializeForms();
+                    Ui.NoActivate = true;
+
+                    vaultPath = Path.Combine(workDir, "clipboard-test.vault");
+                    CleanUp();
+                    session = VaultSession.Create(vaultPath, MasterPassword, VaultFormat.MinIterations);
+                    session.Data.AddEntry(null, "ivan.petrov@example.com", "Qw7!kPz#2026mail", "Почта Gmail");
+                    session.Data.AddEntry(null, "nopass", "", "Без пароля");
+                    session.Save();
+
+                    main = new MainForm(session);
+                    main.Show();
+                    Pump(200);
+
+                    Run("clipboard: copy with the toolbar and with Ctrl+C / Ctrl+B", ClipboardCopy);
+                    Run("clipboard: kept out of the clipboard history and the cloud", ClipboardExclusion);
+                    Run("clipboard: cleared on demand and by the timer", ClipboardClearing);
+                    Run("clipboard: foreign content is never cleared", ClipboardForeignContent);
+                    Run("clipboard: an empty password is not copied", ClipboardEmptyPassword);
+
+                    main.Close();
+                    session.Dispose();
+                    CleanUp();
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    Console.WriteLine("FAIL  clipboard checks could not start");
+                    Console.WriteLine("      " + ex.GetType().Name + ": " + ex.Message);
+                }
+                return failed == 0 ? 0 : 1;
+            }
+        }
+
+        // =====================================================================
+        //  Сценарии
+        // =====================================================================
+
+        /// <summary>
+        /// Значки рисуются из системного шрифта в картинку нужного размера. При масштабе экрана
+        /// 125–200 % размеры получаются самые разные, и ни при одном значок не должен выйти
+        /// пустым или съехать из центра.
+        /// </summary>
+        private static void IconsAtEverySize()
+        {
+            if (!Ui.HasGlyphs)
+            {
+                Console.WriteLine("      no icon font on this system: buttons fall back to text");
+                return;
+            }
+
+            int[] glyphs =
+            {
+                Ui.GlyphAdd, Ui.GlyphEdit, Ui.GlyphDelete, Ui.GlyphCopy, Ui.GlyphEye, Ui.GlyphLock, Ui.GlyphMore,
+                Ui.GlyphFolder, Ui.GlyphMove, Ui.GlyphList, Ui.GlyphPage, Ui.GlyphRename,
+                Ui.GlyphInfo, Ui.GlyphWarning, Ui.GlyphError, Ui.GlyphQuestion
+            };
+
+            foreach (int glyph in glyphs)
+            {
+                for (int size = 10; size <= 72; size++)
+                {
+                    using (Bitmap bitmap = Ui.Glyph(glyph, size, Color.Black))
+                    {
+                        int left = int.MaxValue, top = int.MaxValue, right = -1, bottom = -1;
+                        for (int y = 0; y < bitmap.Height; y++)
+                        {
+                            for (int x = 0; x < bitmap.Width; x++)
+                            {
+                                if (bitmap.GetPixel(x, y).A < 40) continue;
+                                if (x < left) left = x;
+                                if (x > right) right = x;
+                                if (y < top) top = y;
+                                if (y > bottom) bottom = y;
+                            }
+                        }
+
+                        string what = string.Format("glyph {0:X4} at {1} px", glyph, bitmap.Width);
+                        Check(right >= 0, what + " is blank");
+
+                        // Рисунок занимает заметную часть картинки и стоит примерно по центру.
+                        double centerX = (left + right + 1) / 2.0 / bitmap.Width;
+                        double centerY = (top + bottom + 1) / 2.0 / bitmap.Height;
+                        Check(right - left + 1 >= bitmap.Width / 3 || bottom - top + 1 >= bitmap.Height / 3, what + " is too small");
+                        Check(centerX > 0.3 && centerX < 0.7 && centerY > 0.3 && centerY < 0.7,
+                            string.Format("{0} is off-centre ({1:F2}, {2:F2})", what, centerX, centerY));
+                    }
+                }
+            }
+        }
+
+        private static void CreateVault()
+        {
+            using (var form = new UnlockForm(vaultPath))
+            {
+                Check(form.CreateMode, "create mode when there is no file yet");
+                DialogResult result = DialogResult.None;
+
+                Drive<UnlockForm>(delegate { result = form.ShowDialog(); }, delegate(UnlockForm f)
+                {
+                    TextBox password = Find<TextBox>(f, "txtPassword");
+                    TextBox confirm = Find<TextBox>(f, "txtConfirm");
+                    Label error = Find<Label>(f, "lblError");
+                    Label hint = Find<Label>(f, "lblHint");
+                    CheckBox show = Find<CheckBox>(f, "chkShow");
+
+                    Check(password.UseSystemPasswordChar && confirm.UseSystemPasswordChar, "passwords are masked");
+                    Check(!error.Visible, "no error at the start");
+                    Check(Find<Button>(f, "btnOk").Text == "Создать хранилище", "button caption");
+
+                    // Пустой и слишком короткий пароль.
+                    Click(f, "btnOk");
+                    Check(error.Visible && error.Text.Contains("Введите"), "empty password: " + error.Text);
+                    password.Text = "абв";
+                    confirm.Text = "абв";
+                    Check(!error.Visible, "typing clears the error");
+                    Check(hint.Text.Contains("короткий"), "hint for a short password: " + hint.Text);
+                    Click(f, "btnOk");
+                    Check(error.Visible && error.Text.Contains("не короче"), "short password is rejected: " + error.Text);
+                    Shot(f, "01-create-validation");
+
+                    // Пароли не совпадают.
+                    password.Text = MasterPassword;
+                    confirm.Text = MasterPassword + "x";
+                    Click(f, "btnOk");
+                    Check(error.Visible && error.Text.Contains("не совпадают"), "mismatch is rejected: " + error.Text);
+                    Check(f.Visible && !File.Exists(vaultPath), "nothing is created while the input is invalid");
+
+                    // Кнопка «показать пароль».
+                    show.Checked = true;
+                    Check(!password.UseSystemPasswordChar && !confirm.UseSystemPasswordChar, "passwords are shown");
+                    show.Checked = false;
+                    Check(password.UseSystemPasswordChar && password.Text == MasterPassword, "passwords are hidden again, text is kept");
+
+                    confirm.Text = MasterPassword;
+                    Check(hint.Text.Contains("длина"), "hint for a good password: " + hint.Text);
+                    Shot(f, "02-create");
+
+                    Click(f, "btnOk");
+                    WaitDecided(f, 20000, "the vault to be created");
+                });
+
+                Check(result == DialogResult.OK, "dialog result is OK");
+                session = form.TakeSession();
+                Check(session != null, "the dialog returns an open vault");
+                Check(File.Exists(vaultPath), "the vault file exists");
+                Check(session.Data.Entries.Count == 0 && session.Data.Groups.Count == 0, "a new vault is empty");
+            }
+        }
+
+        private static void EmptyMainWindow()
+        {
+            OpenMain();
+
+            Check(GroupNames().Length == 2 && GroupNames()[0] == "Все записи" && GroupNames()[1] == "Без группы", "only the built-in rows in the group list");
+            Check(Groups.SelectedIndex == 0, "'all entries' is selected");
+            Check(Entries.Items.Count == 0, "no entries");
+            Label empty = Find<Label>(main, "lblEmpty");
+            Check(empty.Visible && empty.Text.Contains("Добавить"), "empty state hint: " + empty.Text);
+            Check(StatusText("lblCount") == "Записей: 0", "counter: " + StatusText("lblCount"));
+
+            Check(Tool("toolbar", "btnAdd").Enabled, "'add' is enabled");
+            Check(!Tool("toolbar", "btnEdit").Enabled && !Tool("toolbar", "btnDelete").Enabled, "'edit' and 'delete' need a selection");
+            Check(!Tool("toolbar", "btnCopyLogin").Enabled && !Tool("toolbar", "btnCopyPassword").Enabled && !Tool("toolbar", "btnMove").Enabled, "copy and move need a selection");
+            Check(!Tool("groupBar", "btnGroupRename").Enabled && !Tool("groupBar", "btnGroupDelete").Enabled, "built-in rows cannot be renamed or deleted");
+            Shot(main, "03-main-empty");
+        }
+
+        private static void CreateGroups()
+        {
+            AddGroup("Работа");
+            Check(Groups.SelectedItem.ToString() == "Работа", "a new group becomes selected");
+            Check(StatusText("lblMessage").Contains("Работа") && StatusText("lblMessage").Contains("создана"), "status message: " + StatusText("lblMessage"));
+            AddGroup("  Личное  ");
+            AddGroup("Финансы");
+
+            // Повтор названия (без учёта регистра) и пустое название.
+            Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(InputBox box)
+            {
+                Label error = Find<Label>(box, "lblError");
+                TextBox input = Find<TextBox>(box, "txtInput");
+                Check(input.Text == "" && !error.Visible, "empty prompt");
+
+                Click(box, "btnOk");
+                Check(box.Visible && error.Visible && error.Text.Contains("Введите"), "empty name: " + error.Text);
+
+                input.Text = "работа";
+                Check(!error.Visible, "typing clears the error");
+                Click(box, "btnOk");
+                Check(box.Visible && error.Visible && error.Text.Contains("уже существует"), "duplicate name: " + error.Text);
+                Shot(box, "04-group-duplicate");
+                Click(box, "btnCancel");
+            });
+
+            SameList(new[] { "Все записи", "Личное", "Работа", "Финансы", "Без группы" }, GroupNames(), "group list");
+            Check(session.Data.Groups.Count == 3, "three groups in the vault");
+        }
+
+        private static void CreateEntries()
+        {
+            // Пустая форма не сохраняется.
+            SelectGroup("Все записи");
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+            {
+                Label error = Find<Label>(f, "lblError");
+                Check(Find<ComboBox>(f, "cmbGroup").SelectedItem.ToString() == "Без группы", "no group by default");
+                Check(Find<TextBox>(f, "txtPassword").UseSystemPasswordChar, "password is masked");
+                Click(f, "btnOk");
+                Check(f.Visible && error.Visible && error.Text.Contains("Заполните"), "empty entry is rejected: " + error.Text);
+
+                // Генератор паролей.
+                Click(f, "btnGenerate");
+                TextBox password = Find<TextBox>(f, "txtPassword");
+                string first = password.Text;
+                Check(first.Length == 20, "generated password length: " + first.Length);
+                Check(Find<CheckBox>(f, "chkShow").Checked && !password.UseSystemPasswordChar, "generated password is shown");
+                Click(f, "btnGenerate");
+                Check(password.Text != first && password.Text.Length == 20, "every click gives a new password");
+                Click(f, "btnCancel");
+            });
+            Check(session.Data.Entries.Count == 0, "a cancelled dialog adds nothing");
+
+            AddEntry("Почта Gmail", "ivan.petrov@example.com", "Qw7!kPz#2026mail", "Личное");
+            Check(Groups.SelectedItem.ToString() == "Все записи", "the list stays on 'all entries'");
+            Check(SelectedTitles().Length == 1 && SelectedTitles()[0] == "Почта Gmail", "the new entry is selected");
+            Check(StatusText("lblMessage") == "Запись добавлена", "status message: " + StatusText("lblMessage"));
+
+            SelectGroup("Работа");
+            AddEntry("GitLab — рабочий", "i.petrov", "glpat-N8s2xQ4vT1", "Работа");
+            Check(Groups.SelectedItem.ToString() == "Работа" && Titles().Length == 1, "an entry added into the open group appears in it");
+
+            // Запись создаётся в другой группе — список переходит туда, чтобы её было видно.
+            AddEntry("Госуслуги", "70001234567", "G0su$lugi-2026", "Личное");
+            Check(Groups.SelectedItem.ToString() == "Личное", "the list follows the new entry to its group");
+            Check(SelectedTitles().Length == 1 && SelectedTitles()[0] == "Госуслуги", "and selects it");
+
+            SelectGroup("Все записи");
+            AddEntry("VPN офиса", "i.petrov", "Vpn$ecret-44", "Работа");
+            AddEntry("Сбербанк Онлайн", "70001234567", "Sb3r!Bank#77", "Финансы");
+            AddEntry("Wi-Fi дома\r\nСеть HomeNet_5G, роутер в прихожей", "admin", "wifi-pass-8842", null);
+            AddEntry("Ozon", "ivan.petrov@example.com", "0z0n-Shop!55", "Личное");
+            AddEntry("Хостинг: панель управления", "ipetrov", "H0st!ng-Panel-9", "Работа");
+
+            SelectGroup("Все записи");
+            SameList(new[]
+            {
+                "GitLab — рабочий", "Ozon", "VPN офиса", "Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей",
+                "Госуслуги", "Почта Gmail", "Сбербанк Онлайн", "Хостинг: панель управления"
+            }, Titles(), "entries sorted by description");
+
+            Check(Cell("Почта Gmail", 1) == "ivan.petrov@example.com", "login column");
+            Check(Cell("Почта Gmail", 2) == Mask, "password is masked in the list: " + Cell("Почта Gmail", 2));
+            Check(Cell("Почта Gmail", 3) == "Личное", "group column");
+            Check(Cell("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", 3) == "", "no group name for an ungrouped entry");
+            Check(StatusText("lblCount") == "Записей: 8", "counter: " + StatusText("lblCount"));
+            Check(!Find<Label>(main, "lblEmpty").Visible, "empty hint is hidden");
+
+            Entry wifi = session.Data.Query(GroupFilter.Ungrouped, null)[0];
+            Check(wifi.Description == "Wi-Fi дома\nСеть HomeNet_5G, роутер в прихожей", "multi-line description is stored with line breaks");
+
+            SelectEntries("Почта Gmail");
+            Shot(main, "05-main");
+        }
+
+        private static void FilterByGroup()
+        {
+            Check(GroupCount("Все записи") == 8 && GroupCount("Работа") == 3 && GroupCount("Личное") == 3 &&
+                  GroupCount("Финансы") == 1 && GroupCount("Без группы") == 1, "counters in the group list");
+
+            SelectGroup("Работа");
+            SameList(new[] { "GitLab — рабочий", "VPN офиса", "Хостинг: панель управления" }, Titles(), "entries of one group");
+            Check(StatusText("lblCount") == "Показано: 3 из 8", "counter: " + StatusText("lblCount"));
+            Check(Tool("groupBar", "btnGroupRename").Enabled && Tool("groupBar", "btnGroupDelete").Enabled, "a real group can be renamed and deleted");
+
+            SelectGroup("Без группы");
+            SameList(new[] { "Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей" }, Titles(), "ungrouped entries");
+            Check(!Tool("groupBar", "btnGroupRename").Enabled, "'no group' cannot be renamed");
+
+            // Новая запись по умолчанию попадает в открытую группу.
+            SelectGroup("Работа");
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+            {
+                Check(Find<ComboBox>(f, "cmbGroup").SelectedItem.ToString() == "Работа", "current group is preselected");
+                SameList(new[] { "Без группы", "Личное", "Работа", "Финансы" }, ComboItems(Find<ComboBox>(f, "cmbGroup")), "group choices");
+                Click(f, "btnCancel");
+            });
+
+            SelectEntries("GitLab — рабочий");
+            Shot(main, "06-main-group");
+        }
+
+        private static void EditEntry()
+        {
+            SelectGroup("Работа");
+            SelectEntries("VPN офиса");
+            Check(Tool("toolbar", "btnEdit").Enabled, "'edit' is enabled for one entry");
+
+            // Отмена ничего не меняет.
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+            {
+                Check(f.Text == "Изменение записи", "dialog title");
+                Check(Find<TextBox>(f, "txtDescription").Text == "VPN офиса", "description is loaded");
+                Check(Find<TextBox>(f, "txtLogin").Text == "i.petrov", "login is loaded");
+                Check(Find<TextBox>(f, "txtPassword").Text == "Vpn$ecret-44", "password is loaded");
+                Check(Find<ComboBox>(f, "cmbGroup").SelectedItem.ToString() == "Работа", "group is loaded");
+                Find<TextBox>(f, "txtLogin").Text = "someone-else";
+                Click(f, "btnCancel");
+            });
+            Check(Cell("VPN офиса", 1) == "i.petrov", "cancel keeps the entry");
+
+            // Меняем логин, пароль и группу.
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+            {
+                Find<TextBox>(f, "txtLogin").Text = "i.petrov@corp.example";
+                Find<TextBox>(f, "txtPassword").Text = "N3w-Vpn-pass";
+                SelectCombo(Find<ComboBox>(f, "cmbGroup"), "Личное");
+                Find<CheckBox>(f, "chkShow").Checked = true;
+                Shot(f, "07-entry-edit");
+                Click(f, "btnOk");
+            });
+
+            Check(Groups.SelectedItem.ToString() == "Личное", "the list follows the entry to its new group");
+            Check(SelectedTitles().Length == 1 && SelectedTitles()[0] == "VPN офиса", "the edited entry stays selected");
+            Check(Cell("VPN офиса", 1) == "i.petrov@corp.example" && Cell("VPN офиса", 3) == "Личное", "new values are shown");
+            Entry entry = FindEntry("VPN офиса");
+            Check(entry.Password == "N3w-Vpn-pass", "password is updated");
+            Check(GroupCount("Работа") == 2 && GroupCount("Личное") == 4, "counters after the move");
+
+            // Многострочное описание возвращается в форму с переводами строк.
+            SelectGroup("Без группы");
+            SelectEntries("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей");
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+            {
+                Check(Find<TextBox>(f, "txtDescription").Lines.Length == 2, "two lines in the description box");
+                Click(f, "btnCancel");
+            });
+        }
+
+        private static void MoveByMenu()
+        {
+            SelectGroup("Все записи");
+            SelectEntries("Ozon", "Госуслуги");
+            Check(Tool("toolbar", "btnMove").Enabled && !Tool("toolbar", "btnEdit").Enabled, "several entries: move is enabled, edit is not");
+
+            ToolStripItemCollection menu = MoveMenu();
+            SameList(new[] { "Личное", "Работа", "Финансы", "-", "Без группы", "-", "Новая группа…" }, MenuTexts(menu), "'to group' menu");
+            Check(!MenuItem(menu, "Личное").Enabled, "the group the entries are already in is disabled");
+            Check(MenuItem(menu, "Финансы").Enabled && MenuItem(menu, "Без группы").Enabled, "other targets are enabled");
+
+            MenuItem(menu, "Финансы").PerformClick();
+            Pump(50);
+            Check(Cell("Ozon", 3) == "Финансы" && Cell("Госуслуги", 3) == "Финансы", "both entries moved");
+            Check(GroupCount("Финансы") == 3 && GroupCount("Личное") == 2, "counters after the move");
+            Check(StatusText("lblMessage").Contains("Перемещено") && StatusText("lblMessage").Contains("Финансы") && StatusText("lblMessage").Contains("2 записи"),
+                "status message: " + StatusText("lblMessage"));
+            SameList(new[] { "Ozon", "Госуслуги" }, SelectedTitles(), "moved entries stay selected");
+
+            // В «Без группы».
+            SelectEntries("Ozon");
+            MenuItem(MoveMenu(), "Без группы").PerformClick();
+            Pump(50);
+            Check(Cell("Ozon", 3) == "" && GroupCount("Без группы") == 2, "entry moved out of all groups");
+            Check(!MenuItem(MoveMenu(), "Без группы").Enabled, "'no group' is now disabled for it");
+
+            // В новую группу, которая создаётся на ходу.
+            Drive<InputBox>(delegate { MenuItem(MoveMenu(), "Новая группа…").PerformClick(); }, delegate(InputBox box)
+            {
+                Find<TextBox>(box, "txtInput").Text = "Покупки";
+                Click(box, "btnOk");
+            });
+            Check(Cell("Ozon", 3) == "Покупки" && GroupCount("Покупки") == 1, "entry moved into the new group");
+            SameList(new[] { "Все записи", "Личное", "Покупки", "Работа", "Финансы", "Без группы" }, GroupNames(), "group list with the new group");
+
+            // Внутри группы: перемещённая запись исчезает из списка этой группы.
+            SelectGroup("Финансы");
+            SelectEntries("Госуслуги");
+            MenuItem(MoveMenu(), "Личное").PerformClick();
+            Pump(50);
+            SameList(new[] { "Сбербанк Онлайн" }, Titles(), "the moved entry leaves the open group");
+            Check(GroupCount("Личное") == 3, "and appears in the target group");
+        }
+
+        private static void MoveByDragDrop()
+        {
+            SelectGroup("Все записи");
+            SelectEntries("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", "Сбербанк Онлайн");
+            var data = new DataObject("KeyBox.EntryIds", SelectedIds());
+
+            GroupListBox list = (GroupListBox)Groups;
+            Check(list.AllowDrop, "the group list accepts drops");
+
+            // «Все записи» — не группа, туда бросить нельзя.
+            DragEventArgs over = DragArgs(data, IndexOfGroup("Все записи"));
+            Raise(list, "OnDragOver", over);
+            Check(over.Effect == DragDropEffects.None && list.DropIndex == -1, "'all entries' is not a drop target");
+
+            // Чужие данные не принимаются.
+            DragEventArgs foreign = DragArgs(new DataObject(DataFormats.Text, "text"), IndexOfGroup("Личное"));
+            Raise(list, "OnDragOver", foreign);
+            Check(foreign.Effect == DragDropEffects.None, "foreign data is not accepted");
+
+            over = DragArgs(data, IndexOfGroup("Личное"));
+            Raise(list, "OnDragOver", over);
+            Check(over.Effect == DragDropEffects.Move && list.DropIndex == IndexOfGroup("Личное"), "a group is a drop target and is highlighted");
+            Shot(main, "08-drag-over-group");
+
+            Raise(list, "OnDragDrop", over);
+            Pump(50);
+            Check(list.DropIndex == -1, "highlight is removed after the drop");
+            Check(Cell("Сбербанк Онлайн", 3) == "Личное" && Cell("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", 3) == "Личное", "dropped entries moved");
+            Check(GroupCount("Личное") == 5 && GroupCount("Финансы") == 0, "counters after the drop");
+
+            // Опустевшая группа объясняет, как её наполнить.
+            SelectGroup("Финансы");
+            Label empty = Find<Label>(main, "lblEmpty");
+            Check(empty.Visible && empty.Text.Contains("В этой группе"), "empty group hint: " + empty.Text);
+            Shot(main, "08a-empty-group");
+            SelectGroup("Все записи");
+
+            // Обратно: в «Без группы» и в «Финансы».
+            SelectEntries("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей");
+            DragEventArgs toNone = DragArgs(new DataObject("KeyBox.EntryIds", SelectedIds()), IndexOfGroup("Без группы"));
+            Raise(list, "OnDragOver", toNone);
+            Check(toNone.Effect == DragDropEffects.Move, "'no group' is a drop target");
+            Raise(list, "OnDragDrop", toNone);
+            Pump(50);
+            Check(Cell("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", 3) == "", "entry dropped on 'no group'");
+
+            SelectEntries("Сбербанк Онлайн", "Госуслуги");
+            DragEventArgs toFinance = DragArgs(new DataObject("KeyBox.EntryIds", SelectedIds()), IndexOfGroup("Финансы"));
+            Raise(list, "OnDragOver", toFinance);
+            Raise(list, "OnDragDrop", toFinance);
+            Pump(50);
+            Check(GroupCount("Финансы") == 2 && GroupCount("Личное") == 2, "entries dropped back");
+
+            // Уход курсора со списка снимает подсветку.
+            Raise(list, "OnDragOver", DragArgs(data, IndexOfGroup("Работа")));
+            Check(list.DropIndex >= 0, "highlight is on");
+            Raise(list, "OnDragLeave", EventArgs.Empty);
+            Check(list.DropIndex == -1, "highlight is off after the cursor leaves");
+        }
+
+        private static void Search()
+        {
+            SelectGroup("Работа");
+            SetSearch("petrov");
+            Check(Groups.SelectedItem.ToString() == "Все записи", "search starts across all groups");
+            SameList(new[] { "GitLab — рабочий", "Ozon", "VPN офиса", "Почта Gmail", "Хостинг: панель управления" }, Titles(), "search by login");
+            Check(StatusText("lblCount") == "Показано: 5 из 8", "counter: " + StatusText("lblCount"));
+
+            SetSearch("ПОЧТА");
+            SameList(new[] { "Почта Gmail" }, Titles(), "search in the description ignores case");
+
+            SetSearch("финансы");
+            SameList(new[] { "Госуслуги", "Сбербанк Онлайн" }, Titles(), "search by group name");
+
+            SetSearch("petrov работа");
+            SameList(new[] { "GitLab — рабочий", "Хостинг: панель управления" }, Titles(), "several words must all match");
+
+            // Выбор группы при активном поиске сужает результат до этой группы.
+            SetSearch("petrov");
+            SelectGroup("Личное");
+            SameList(new[] { "VPN офиса", "Почта Gmail" }, Titles(), "search inside a chosen group");
+
+            SetSearch("Sb3r");
+            Check(Titles().Length == 0, "passwords are not searched");
+            Label empty = Find<Label>(main, "lblEmpty");
+            Check(empty.Visible && empty.Text.Contains("Ничего не найдено"), "nothing found hint: " + empty.Text);
+            Shot(main, "09-search-nothing");
+
+            SetSearch("");
+            SelectGroup("Все записи");
+            Check(Titles().Length == 8 && !empty.Visible, "clearing the search restores the list");
+        }
+
+        private static void ShowPasswordsAndSort()
+        {
+            SelectGroup("Все записи");
+            ClickTool("toolbar", "btnShow");
+            Check(Cell("Почта Gmail", 2) == "Qw7!kPz#2026mail", "password is shown: " + Cell("Почта Gmail", 2));
+            Check(((ToolStripButton)Tool("toolbar", "btnShow")).Checked, "button stays pressed");
+            SelectEntries("Сбербанк Онлайн");
+            Shot(main, "10-passwords-shown");
+            ClickTool("toolbar", "btnShow");
+            Check(Cell("Почта Gmail", 2) == Mask, "password is hidden again");
+            SameList(new[] { "Сбербанк Онлайн" }, SelectedTitles(), "selection survives the refresh");
+
+            // Сортировка щелчком по заголовку.
+            ListView list = Entries;
+            Raise(list, "OnColumnClick", new ColumnClickEventArgs(1));
+            string[] byLogin = Column(1);
+            Check(byLogin[0] == "70001234567" && byLogin[byLogin.Length - 1] == "ivan.petrov@example.com", "ascending by login: " + string.Join(", ", byLogin));
+            Raise(list, "OnColumnClick", new ColumnClickEventArgs(1));
+            Check(Column(1)[0] == "ivan.petrov@example.com", "descending by login");
+
+            string[] before = Titles();
+            Raise(list, "OnColumnClick", new ColumnClickEventArgs(2));
+            SameList(before, Titles(), "clicking the password column does not sort", true);
+
+            Raise(list, "OnColumnClick", new ColumnClickEventArgs(3));
+            Check(Column(3)[0] == "" && Column(3)[Column(3).Length - 1] == "Финансы", "ascending by group: " + string.Join(", ", Column(3)));
+
+            Raise(list, "OnColumnClick", new ColumnClickEventArgs(0));
+            Check(Titles()[0] == "GitLab — рабочий", "back to sorting by description");
+        }
+
+        private static void Shortcuts()
+        {
+            SelectGroup("Все записи");
+
+            Key(Keys.Control | Keys.H);
+            Check(Cell("Ozon", 2) == "0z0n-Shop!55", "Ctrl+H shows passwords");
+            Key(Keys.Control | Keys.H);
+            Check(Cell("Ozon", 2) == Mask, "Ctrl+H hides them again");
+
+            SetSearch("ozon");
+            Check(Titles().Length == 1, "search is active");
+            Key(Keys.Escape);
+            Check(SearchBox.Text == "" && Titles().Length == 8, "Esc clears the search");
+
+            // Ins открывает новую запись, Ctrl+G — новую группу.
+            Drive<EntryForm>(delegate { Key(Keys.Insert); }, delegate(EntryForm f) { Click(f, "btnCancel"); });
+            Drive<InputBox>(delegate { Key(Keys.Control | Keys.G); }, delegate(InputBox box) { Click(box, "btnCancel"); });
+
+            // В списке: Ctrl+A, F2, Del.
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.A));
+            Check(Entries.SelectedItems.Count == 8, "Ctrl+A selects everything");
+
+            SelectEntries("Ozon");
+            Drive<EntryForm>(delegate { Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.F2)); }, delegate(EntryForm f)
+            {
+                Check(Find<TextBox>(f, "txtDescription").Text == "Ozon", "F2 opens the selected entry");
+                Click(f, "btnCancel");
+            });
+            Drive<MsgBox>(delegate { Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box)
+            {
+                Check(Find<Label>(box, "lblText").Text.Contains("Ozon"), "Del asks about the selected entry");
+                Click(box, "btnCancel");
+            });
+            Check(Titles().Length == 8, "nothing is deleted after 'cancel'");
+
+            // Двойной щелчок / Enter по записи.
+            Drive<EntryForm>(delegate { Raise(Entries, "OnItemActivate", EventArgs.Empty); }, delegate(EntryForm f) { Click(f, "btnCancel"); });
+
+            // В списке групп: F2 и Del.
+            SelectGroup("Покупки");
+            Drive<InputBox>(delegate { Raise(Groups, "OnKeyDown", new KeyEventArgs(Keys.F2)); }, delegate(InputBox box)
+            {
+                Check(Find<TextBox>(box, "txtInput").Text == "Покупки", "F2 renames the selected group");
+                Click(box, "btnCancel");
+            });
+            Drive<MsgBox>(delegate { Raise(Groups, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box) { Click(box, "btnCancel"); });
+            Check(IndexOfGroup("Покупки") > 0, "the group is still there after 'cancel'");
+        }
+
+        private static void DeleteEntry()
+        {
+            SelectGroup("Все записи");
+            SelectEntries("Хостинг: панель управления");
+
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
+            {
+                string text = Find<Label>(box, "lblText").Text;
+                Check(text.Contains("Хостинг: панель управления") && text.Contains("нельзя"), "question names the entry: " + text);
+                Check(box.ActiveControl == Find<Button>(box, "btnCancel"), "'cancel' is the default for a destructive action");
+                Shot(box, "11-confirm-delete");
+                Click(box, "btnCancel");
+            });
+            Check(Titles().Length == 8, "cancel keeps the entry");
+
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            Check(Titles().Length == 7 && FindEntry("Хостинг: панель управления") == null, "entry is deleted");
+            Check(StatusText("lblMessage").Contains("Удалено: 1 запись"), "status message: " + StatusText("lblMessage"));
+            Check(GroupCount("Работа") == 1, "group counter after deletion");
+            Check(!Tool("toolbar", "btnDelete").Enabled, "nothing is selected after deletion");
+
+            // Несколько записей сразу.
+            AddEntry("Временная 1", "tmp1", "p1", null);
+            AddEntry("Временная 2", "tmp2", "p2", null);
+            SelectGroup("Все записи");
+            SelectEntries("Временная 1", "Временная 2");
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
+            {
+                Check(Find<Label>(box, "lblText").Text.Contains("2 выбранные записи"), "question for several entries: " + Find<Label>(box, "lblText").Text);
+                Click(box, "btnOk");
+            });
+            Check(Titles().Length == 7, "both entries are deleted");
+        }
+
+        private static void RenameAndDeleteGroup()
+        {
+            SelectGroup("Работа");
+            Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupRename"); }, delegate(InputBox box)
+            {
+                TextBox input = Find<TextBox>(box, "txtInput");
+                Label error = Find<Label>(box, "lblError");
+                Check(input.Text == "Работа", "current name is offered");
+
+                input.Text = "личное";
+                Click(box, "btnOk");
+                Check(box.Visible && error.Visible && error.Text.Contains("уже существует"), "name of another group is rejected");
+
+                input.Text = "Работа и проекты";
+                Click(box, "btnOk");
+            });
+            SameList(new[] { "Все записи", "Личное", "Покупки", "Работа и проекты", "Финансы", "Без группы" }, GroupNames(), "renamed group");
+            Check(Groups.SelectedItem.ToString() == "Работа и проекты", "renamed group stays selected");
+            Check(Cell("GitLab — рабочий", 3) == "Работа и проекты", "entries show the new name");
+
+            // Удаление группы с записями: записи остаются.
+            SelectGroup("Финансы");
+            int before = session.Data.Entries.Count;
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box)
+            {
+                string text = Find<Label>(box, "lblText").Text;
+                Check(text.Contains("Финансы") && text.Contains("2 записи") && text.Contains("Без группы"), "question explains what happens to entries: " + text);
+                Shot(box, "12-confirm-delete-group");
+                Click(box, "btnOk");
+            });
+            Check(IndexOfGroup("Финансы") < 0, "group is deleted");
+            Check(session.Data.Entries.Count == before, "entries are kept");
+            Check(Groups.SelectedItem.ToString() == "Без группы", "the list shows where the entries went");
+            Check(Titles().Length == 3 && Cell("Сбербанк Онлайн", 3) == "", "released entries are ungrouped");
+
+            // Пустая группа удаляется без пояснений про записи.
+            SelectGroup("Все записи");
+            SelectEntries("Ozon");
+            MenuItem(MoveMenu(), "Личное").PerformClick();
+            Pump(50);
+            SelectGroup("Покупки");
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box)
+            {
+                Check(!Find<Label>(box, "lblText").Text.Contains("Без группы"), "no remark about entries for an empty group");
+                Click(box, "btnOk");
+            });
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "Без группы" }, GroupNames(), "groups after deletion");
+            Check(Groups.SelectedItem.ToString() == "Все записи", "selection returns to all entries");
+        }
+
+        private static void LongTexts()
+        {
+            string longName = ("Очень длинное название группы, которое не помещается в отведённое место " + new string('я', 100))
+                .Substring(0, VaultData.MaxGroupNameLength);
+            AddGroup(longName);
+            string longDescription = "Очень длинное описание записи: " + new string('ж', 300) + " конец";
+            AddEntry(longDescription, new string('l', 120) + "@example.com", new string('p', 200), longName);
+
+            SelectGroup("Все записи");
+            ClickTool("toolbar", "btnShow");
+            Shot(main, "13-long-texts");
+            ClickTool("toolbar", "btnShow");
+
+            // Вопрос с длинным названием не должен раздувать окно.
+            SelectEntries(Ui.SingleLine(longDescription));
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
+            {
+                Check(box.Width <= Ui.S(560), "message box keeps a sane width: " + box.Width);
+                Shot(box, "14-long-question");
+                Click(box, "btnOk");
+            });
+            SelectGroup(longName);
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            Check(session.Data.Groups.Count == 2 && session.Data.Entries.Count == 7, "temporary data is removed");
+        }
+
+        // Эти пять проверок выполняются только в режиме --clipboard-child (см. ClipboardChild).
+
+        private static void ClipboardCopy()
+        {
+            Check(!Clipboard.ContainsText(), "the isolated clipboard starts empty");
+            SelectEntries("Почта Gmail");
+
+            ClickTool("toolbar", "btnCopyPassword");
+            Check(Clipboard.GetText() == "Qw7!kPz#2026mail", "password is in the clipboard");
+            Check(ClipboardGuard.Pending && ClipboardGuard.SecondsLeft == MainForm.ClipboardClearSeconds, "countdown has started");
+            Check(StatusText("lblMessage").Contains("Пароль скопирован") && StatusText("lblMessage").Contains("через 30 с"),
+                "status: " + StatusText("lblMessage"));
+
+            ClickTool("toolbar", "btnCopyLogin");
+            Check(Clipboard.GetText() == "ivan.petrov@example.com", "login is in the clipboard");
+            Check(StatusText("lblMessage").Contains("Логин скопирован"), "status: " + StatusText("lblMessage"));
+
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.C));
+            Check(Clipboard.GetText() == "Qw7!kPz#2026mail", "Ctrl+C copies the password");
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.B));
+            Check(Clipboard.GetText() == "ivan.petrov@example.com", "Ctrl+B copies the login");
+
+            // Отсчёт идёт и виден в строке состояния.
+            WaitUntil(delegate { return ClipboardGuard.SecondsLeft < MainForm.ClipboardClearSeconds; }, 4000, "the countdown to tick");
+            Check(StatusText("lblMessage").Contains("через " + ClipboardGuard.SecondsLeft + " с"), "countdown in the status bar: " + StatusText("lblMessage"));
+        }
+
+        private static void ClipboardExclusion()
+        {
+            SelectEntries("Почта Gmail");
+            ClickTool("toolbar", "btnCopyPassword");
+
+            IDataObject copied = Clipboard.GetDataObject();
+            Check(copied.GetDataPresent(DataFormats.UnicodeText), "plain text is offered");
+            Check(copied.GetDataPresent("ExcludeClipboardContentFromMonitorProcessing"), "marked to stay out of clipboard monitors");
+            Check(copied.GetDataPresent("CanIncludeInClipboardHistory"), "history flag is present");
+            Check(copied.GetDataPresent("CanUploadToCloudClipboard"), "cloud flag is present");
+            Check(ReadInt32(copied, "CanIncludeInClipboardHistory") == 0, "history flag is zero: " + ReadInt32(copied, "CanIncludeInClipboardHistory"));
+            Check(ReadInt32(copied, "CanUploadToCloudClipboard") == 0, "cloud flag is zero: " + ReadInt32(copied, "CanUploadToCloudClipboard"));
+        }
+
+        private static void ClipboardClearing()
+        {
+            SelectEntries("Почта Gmail");
+            ClickTool("toolbar", "btnCopyPassword");
+            Check(Clipboard.ContainsText(), "password is in the clipboard");
+
+            // По требованию — так программа делает при выходе.
+            ClipboardGuard.ClearIfOwned();
+            Check(!Clipboard.ContainsText() && !ClipboardGuard.Pending, "clipboard is cleared on demand");
+            Check(StatusText("lblMessage").Contains("очищен"), "status: " + StatusText("lblMessage"));
+            ClipboardGuard.ClearIfOwned();   // повторный вызов безвреден
+
+            // По таймеру.
+            Check(ClipboardGuard.Copy("timed secret", "Пароль", 2), "copy with a short timeout");
+            Check(Clipboard.GetText() == "timed secret", "the value is in the clipboard");
+            WaitUntil(delegate { return !ClipboardGuard.Pending; }, 6000, "the clipboard timer");
+            Check(!Clipboard.ContainsText(), "clipboard is cleared by the timer");
+            Check(StatusText("lblMessage").Contains("очищен"), "status after the timer: " + StatusText("lblMessage"));
+        }
+
+        private static void ClipboardForeignContent()
+        {
+            Check(ClipboardGuard.Copy("our secret", "Пароль", 2), "copy");
+            Clipboard.SetText("copied by the user from another program");
+            WaitUntil(delegate { return !ClipboardGuard.Pending; }, 6000, "the clipboard timer");
+            Check(Clipboard.GetText() == "copied by the user from another program", "content copied later by someone else is left alone");
+
+            // То же при очистке по требованию.
+            Check(ClipboardGuard.Copy("our secret", "Пароль", 30), "copy again");
+            Clipboard.SetText("still not ours");
+            ClipboardGuard.ClearIfOwned();
+            Check(Clipboard.GetText() == "still not ours", "clearing on demand also leaves foreign content alone");
+            Clipboard.Clear();
+        }
+
+        private static void ClipboardEmptyPassword()
+        {
+            SelectEntries("Без пароля");
+            Check(Cell("Без пароля", 2) == "", "an empty password is shown as empty, not as a mask");
+
+            ClickTool("toolbar", "btnCopyPassword");
+            Check(!Clipboard.ContainsText() && !ClipboardGuard.Pending, "nothing is copied");
+            Check(StatusText("lblMessage").Contains("не задан"), "status: " + StatusText("lblMessage"));
+
+            ClickTool("toolbar", "btnCopyLogin");
+            Check(Clipboard.GetText() == "nopass", "the login of the same entry is copied");
+            ClipboardGuard.ClearIfOwned();
+        }
+
+        private static void About()
+        {
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "miAbout"); }, delegate(MsgBox box)
+            {
+                string text = Find<Label>(box, "lblText").Text;
+                Check(text.Contains("AES-256-GCM") && text.Contains("PBKDF2-HMAC-SHA512") && text.Contains("600"), "encryption is described: " + text);
+                Check(text.Contains("2 группы") && text.Contains("7 записей"), "vault contents are counted: " + text);
+                Check(text.Contains(Path.GetFileName(vaultPath)), "the vault file is named");
+                Check(box.Width <= Ui.S(560), "the box keeps a sane width: " + box.Width);
+                Shot(box, "22-about");
+                Click(box, "btnOk");
+            });
+        }
+
+        private static void SaveFailure()
+        {
+            // Мешаем записи: на месте временного файла стоит папка.
+            string obstacle = vaultPath + ".tmp";
+            Directory.CreateDirectory(obstacle);
+            int onDisk = CountOnDisk();
+
+            try
+            {
+                // Первая попытка проваливается, пользователь нажимает «Отмена».
+                Drive<MsgBox>(delegate
+                {
+                    Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+                    {
+                        Find<TextBox>(f, "txtDescription").Text = "Запись при сбое";
+                        Find<TextBox>(f, "txtLogin").Text = "unsaved";
+                        Click(f, "btnOk");
+                    });
+                }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    Check(box.Text == "Не удалось сохранить" && text.Contains("только в памяти"), "failure is explained: " + text);
+                    Check(Find<Button>(box, "btnOk").Text == "Повторить", "retry is offered");
+                    Shot(box, "16-save-failed");
+                    Click(box, "btnCancel");
+                });
+
+                Check(FindEntry("Запись при сбое") != null, "the change is kept in memory");
+                Check(CountOnDisk() == onDisk, "the file on disk is untouched");
+                Check(StatusText("lblMessage").Contains("не записаны"), "a warning stays in the status bar: " + StatusText("lblMessage"));
+                Shot(main, "17-unsaved-warning");
+
+                // Следующее изменение: сбой повторяется, препятствие устраняют и жмут «Повторить».
+                Drive<MsgBox>(delegate
+                {
+                    Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(InputBox box)
+                    {
+                        Find<TextBox>(box, "txtInput").Text = "Группа при сбое";
+                        Click(box, "btnOk");
+                    });
+                }, delegate(MsgBox box)
+                {
+                    Directory.Delete(obstacle, true);
+                    Click(box, "btnOk");
+                });
+
+                Check(!StatusText("lblMessage").Contains("не записаны"), "the warning is gone after a successful save: " + StatusText("lblMessage"));
+                Check(CountOnDisk() == onDisk + 2, "everything pending (the entry and the group) is written by the retry");
+            }
+            finally
+            {
+                if (Directory.Exists(obstacle)) Directory.Delete(obstacle, true);
+            }
+
+            // Убираем за собой.
+            SelectGroup("Все записи");
+            SelectEntries("Запись при сбое");
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            SelectGroup("Группа при сбое");
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+        }
+
+        private static void Persistence()
+        {
+            using (VaultSession copy = VaultSession.Open(vaultPath, MasterPassword))
+            {
+                Check(copy.Data.Groups.Count == session.Data.Groups.Count && copy.Data.Groups.Count == 2, "groups on disk: " + copy.Data.Groups.Count);
+                Check(copy.Data.Entries.Count == session.Data.Entries.Count && copy.Data.Entries.Count == 7, "entries on disk: " + copy.Data.Entries.Count);
+                foreach (Entry entry in session.Data.Entries)
+                {
+                    Entry stored = copy.Data.FindEntry(entry.Id);
+                    Check(stored != null && stored.Login == entry.Login && stored.Password == entry.Password &&
+                          stored.Description == entry.Description && stored.GroupId == entry.GroupId, "entry on disk: " + entry.Description);
+                }
+            }
+            Check(File.Exists(vaultPath + ".bak"), "previous version is kept as a backup");
+            Check(!File.Exists(vaultPath + ".tmp"), "no temporary file is left");
+
+            byte[] raw = File.ReadAllBytes(vaultPath);
+            Check(Encoding.ASCII.GetString(raw, 0, 6) == "KEYBOX", "file signature");
+            foreach (string secret in new[] { "Qw7!kPz#2026mail", "ivan.petrov", "Gmail", MasterPassword })
+            {
+                Check(IndexOf(raw, Encoding.UTF8.GetBytes(secret)) < 0, "no plaintext in the file: " + secret);
+            }
+        }
+
+        private static void Lock()
+        {
+            SelectGroup("Все записи");
+            SelectEntries("Госуслуги");
+            Shot(main, "18-main-final");
+
+            MainForm window = main;
+            ClickTool("toolbar", "btnLock");
+            WaitUntil(delegate { return window.IsDisposed; }, 5000, "the window to close");
+            Check(window.LockRequested, "the window reports that a lock was requested");
+
+            // Так же поступает программа: после блокировки ключ и данные выбрасываются.
+            session.Dispose();
+            Check(session.Data == null, "decrypted data is dropped");
+            session = null;
+            main = null;
+        }
+
+        private static void Unlock()
+        {
+            using (var form = new UnlockForm(vaultPath))
+            {
+                Check(!form.CreateMode, "unlock mode when the file exists");
+                DialogResult result = DialogResult.None;
+
+                Drive<UnlockForm>(delegate { result = form.ShowDialog(); }, delegate(UnlockForm f)
+                {
+                    TextBox password = Find<TextBox>(f, "txtPassword");
+                    Label error = Find<Label>(f, "lblError");
+                    Check(f.Controls.Find("txtConfirm", true).Length == 0, "no confirmation field when unlocking");
+                    Check(Find<Button>(f, "btnOk").Text == "Открыть", "button caption");
+                    Check(Find<Label>(f, "lblPath").Text.Contains(Path.GetFileName(vaultPath)), "the file is named");
+                    Shot(f, "19-unlock");
+
+                    Click(f, "btnOk");
+                    Check(error.Visible && error.Text.Contains("Введите"), "empty password: " + error.Text);
+
+                    password.Text = MasterPassword + "!";
+                    Click(f, "btnOk");
+                    Check(f.IsBusy && !password.Enabled, "the dialog is busy while the password is checked");
+                    WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
+                    Check(f.Visible && error.Visible && error.Text.Contains("Неверный мастер-пароль"), "wrong password is rejected: " + error.Text);
+                    Check(password.Enabled && Find<Button>(f, "btnOk").Text == "Открыть", "the dialog is usable again");
+                    Shot(f, "20-unlock-wrong");
+
+                    password.Text = MasterPassword;
+                    Check(!error.Visible, "typing clears the error");
+                    Click(f, "btnOk");
+                    WaitDecided(f, 20000, "the vault to open");
+                });
+
+                Check(result == DialogResult.OK, "dialog result is OK");
+                session = form.TakeSession();
+                Check(session != null && session.Data.Entries.Count == 7 && session.Data.Groups.Count == 2, "the vault is opened with all its data");
+            }
+
+            // «Выход» в окне входа ничего не открывает.
+            using (var form = new UnlockForm(vaultPath))
+            {
+                DialogResult result = DialogResult.None;
+                Drive<UnlockForm>(delegate { result = form.ShowDialog(); }, delegate(UnlockForm f) { Click(f, "btnCancel"); });
+                Check(result == DialogResult.Cancel && form.TakeSession() == null, "'exit' opens nothing");
+            }
+        }
+
+        private static void ChangeMasterPassword()
+        {
+            OpenMain();
+            Check(Titles().Length == 7, "data is shown after unlocking");
+
+            Drive<ChangePasswordForm>(delegate { main.ChangeMasterPassword(); }, delegate(ChangePasswordForm f)
+            {
+                TextBox current = Find<TextBox>(f, "txtCurrent");
+                TextBox replacement = Find<TextBox>(f, "txtNew");
+                TextBox confirm = Find<TextBox>(f, "txtConfirm");
+                Label error = Find<Label>(f, "lblError");
+
+                Click(f, "btnOk");
+                Check(error.Visible && error.Text.Contains("текущий"), "current password is required: " + error.Text);
+
+                current.Text = MasterPassword;
+                replacement.Text = "кор";
+                confirm.Text = "кор";
+                Click(f, "btnOk");
+                Check(error.Visible && error.Text.Contains("не короче"), "short new password is rejected: " + error.Text);
+
+                replacement.Text = NewMasterPassword;
+                confirm.Text = NewMasterPassword + "?";
+                Click(f, "btnOk");
+                Check(error.Visible && error.Text.Contains("не совпадают"), "mismatch is rejected: " + error.Text);
+
+                replacement.Text = MasterPassword;
+                confirm.Text = MasterPassword;
+                Click(f, "btnOk");
+                Check(error.Visible && error.Text.Contains("совпадает с текущим"), "same password is rejected: " + error.Text);
+
+                // Неверный текущий пароль.
+                current.Text = "не тот пароль";
+                replacement.Text = NewMasterPassword;
+                confirm.Text = NewMasterPassword;
+                Click(f, "btnOk");
+                WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
+                Check(f.Visible && error.Visible && error.Text.Contains("неверно"), "wrong current password is rejected: " + error.Text);
+                Shot(f, "21-change-password");
+
+                current.Text = MasterPassword;
+                Click(f, "btnOk");
+                WaitDecided(f, 30000, "the vault to be re-encrypted");
+            });
+            Check(StatusText("lblMessage").Contains("Мастер-пароль изменён"), "status: " + StatusText("lblMessage"));
+
+            bool oldWorks = true;
+            try
+            {
+                VaultSession.Open(vaultPath, MasterPassword).Dispose();
+            }
+            catch (VaultException ex)
+            {
+                oldWorks = ex.Error != VaultError.WrongPassword;
+            }
+            Check(!oldWorks, "the old master password no longer opens the vault");
+            using (VaultSession copy = VaultSession.Open(vaultPath, NewMasterPassword))
+            {
+                Check(copy.Data.Entries.Count == 7, "the new master password opens it with all data");
+            }
+
+            // Хранилище продолжает работать на новом ключе.
+            AddEntry("После смены пароля", "after", "x", null);
+            using (VaultSession copy = VaultSession.Open(vaultPath, NewMasterPassword))
+            {
+                Check(copy.Data.Entries.Count == 8, "changes after the password change are saved");
+            }
+        }
+
+        private static void AutoLock()
+        {
+            MainForm window = main;
+            int entries = session.Data.Entries.Count;
+
+            Drive<EntryForm>(delegate { window.AddEntry(); }, delegate(EntryForm f)
+            {
+                Find<TextBox>(f, "txtDescription").Text = "Не должна сохраниться";
+                Find<TextBox>(f, "txtLogin").Text = "nobody";
+                window.AutoLockSeconds = 0;   // «бездействие» наступает сразу
+                WaitDecided(f, 6000, "the dialog to be closed by auto-lock");
+            });
+
+            WaitUntil(delegate { return window.IsDisposed; }, 6000, "the main window to close");
+            Check(window.LockRequested, "auto-lock is reported as a lock");
+            Check(session.Data.Entries.Count == entries, "an unfinished dialog saves nothing");
+            main = null;
+        }
+
+        // =====================================================================
+        //  Действия «как пользователь»
+        // =====================================================================
+
+        private static void OpenMain()
+        {
+            main = new MainForm(session);
+            if (visible)
+            {
+                main.StartPosition = FormStartPosition.Manual;
+                main.Location = new Point(Ui.S(40), Ui.S(30));
+            }
+            main.ClientSize = new Size(Ui.S(1040), Ui.S(620));
+            main.Show();
+            Pump(200);
+        }
+
+        private static void AddGroup(string name)
+        {
+            Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(InputBox box)
+            {
+                Find<TextBox>(box, "txtInput").Text = name;
+                Click(box, "btnOk");
+            });
+        }
+
+        private static void AddEntry(string description, string login, string password, string group)
+        {
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+            {
+                Check(f.Text == "Новая запись", "dialog title");
+                Find<TextBox>(f, "txtDescription").Text = description;
+                Find<TextBox>(f, "txtLogin").Text = login;
+                Find<TextBox>(f, "txtPassword").Text = password;
+                SelectCombo(Find<ComboBox>(f, "cmbGroup"), group ?? "Без группы");
+                Click(f, "btnOk");
+            });
+        }
+
+        private static void SelectGroup(string name)
+        {
+            int index = IndexOfGroup(name);
+            if (index < 0) throw new Exception("no such group in the list: " + name);
+            Groups.SelectedIndex = index;
+            Pump(30);
+        }
+
+        private static void SelectEntries(params string[] titles)
+        {
+            ListView list = Entries;
+            list.SelectedItems.Clear();
+            foreach (string title in titles)
+            {
+                bool found = false;
+                foreach (ListViewItem item in list.Items)
+                {
+                    if (item.Text == title)
+                    {
+                        item.Selected = true;
+                        // Как при щелчке мышью: фокус переходит на выбранную строку.
+                        if (list.SelectedItems.Count == 1) item.Focused = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) throw new Exception("no such entry in the list: " + title);
+            }
+            Pump(30);
+        }
+
+        private static void SetSearch(string text)
+        {
+            SearchBox.Text = text;
+            Pump(30);
+        }
+
+        private static void SelectCombo(ComboBox combo, string text)
+        {
+            for (int i = 0; i < combo.Items.Count; i++)
+            {
+                if (combo.Items[i].ToString() == text)
+                {
+                    combo.SelectedIndex = i;
+                    return;
+                }
+            }
+            throw new Exception("no such choice: " + text);
+        }
+
+        private static void Click(Control root, string name)
+        {
+            Button button = Find<Button>(root, name);
+            if (!button.Enabled || !button.Visible) throw new Exception("button is not available: " + name);
+            button.PerformClick();
+        }
+
+        private static void ClickTool(string strip, string name)
+        {
+            ToolStripItem item = Tool(strip, name);
+            if (!item.Enabled) throw new Exception("command is disabled: " + name);
+            item.PerformClick();
+            Pump(30);
+        }
+
+        /// <summary>Нажатие сочетания клавиш в главном окне.</summary>
+        private static void Key(Keys keys)
+        {
+            object[] arguments = { Message.Create(main.Handle, 0x0100, IntPtr.Zero, IntPtr.Zero), keys };
+            MethodInfo method = typeof(MainForm).GetMethod("ProcessCmdKey", BindingFlags.Instance | BindingFlags.NonPublic);
+            try
+            {
+                method.Invoke(main, arguments);
+            }
+            catch (TargetInvocationException ex)
+            {
+                throw new Exception("shortcut " + keys + " failed: " + ex.InnerException.Message, ex.InnerException);
+            }
+            Pump(30);
+        }
+
+        /// <summary>
+        /// Вызывает защищённый метод Windows Forms, который обычно вызывается самой системой
+        /// (щелчок по заголовку столбца, нажатие клавиши, перетаскивание).
+        /// </summary>
+        private static void Raise(Control control, string method, EventArgs arguments)
+        {
+            for (Type type = control.GetType(); type != null; type = type.BaseType)
+            {
+                MethodInfo info = type.GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (info != null)
+                {
+                    try
+                    {
+                        info.Invoke(control, new object[] { arguments });
+                    }
+                    catch (TargetInvocationException ex)
+                    {
+                        throw new Exception(method + " failed: " + ex.InnerException.Message, ex.InnerException);
+                    }
+                    Pump(30);
+                    return;
+                }
+            }
+            throw new Exception("method not found: " + method);
+        }
+
+        private static DragEventArgs DragArgs(IDataObject data, int groupIndex)
+        {
+            ListBox list = Groups;
+            Rectangle item = list.GetItemRectangle(groupIndex);
+            Point screen = list.PointToScreen(new Point(item.X + item.Width / 2, item.Y + item.Height / 2));
+            return new DragEventArgs(data, 0, screen.X, screen.Y, DragDropEffects.Move, DragDropEffects.None);
+        }
+
+        private static ToolStripItemCollection MoveMenu()
+        {
+            // Меню заполняется в момент открытия; вызываем заполнение напрямую, не показывая меню.
+            var button = (ToolStripDropDownButton)Tool("toolbar", "btnMove");
+            MethodInfo populate = typeof(MainForm).GetMethod("PopulateMoveMenu", BindingFlags.Instance | BindingFlags.NonPublic);
+            populate.Invoke(main, new object[] { button.DropDownItems });
+            return button.DropDownItems;
+        }
+
+        private static ToolStripItem MenuItem(ToolStripItemCollection items, string text)
+        {
+            foreach (ToolStripItem item in items)
+            {
+                if (item.Text == text) return item;
+            }
+            throw new Exception("no such menu item: " + text);
+        }
+
+        private static string[] MenuTexts(ToolStripItemCollection items)
+        {
+            var texts = new List<string>();
+            foreach (ToolStripItem item in items)
+            {
+                texts.Add(item is ToolStripSeparator ? "-" : item.Text);
+            }
+            return texts.ToArray();
+        }
+
+        // =====================================================================
+        //  Чтение состояния окна
+        // =====================================================================
+
+        private static ListBox Groups
+        {
+            get { return Find<ListBox>(main, "lstGroups"); }
+        }
+
+        private static ListView Entries
+        {
+            get { return Find<ListView>(main, "lvEntries"); }
+        }
+
+        private static ToolStripTextBox SearchBox
+        {
+            get { return (ToolStripTextBox)Tool("toolbar", "txtSearch"); }
+        }
+
+        private static T Find<T>(Control root, string name) where T : Control
+        {
+            Control[] found = root.Controls.Find(name, true);
+            if (found.Length == 0) throw new Exception("control not found: " + name);
+            T typed = found[0] as T;
+            if (typed == null) throw new Exception("control " + name + " has type " + found[0].GetType().Name);
+            return typed;
+        }
+
+        private static ToolStripItem Tool(string strip, string name)
+        {
+            ToolStripItem[] found = Find<ToolStrip>(main, strip).Items.Find(name, true);
+            if (found.Length == 0) throw new Exception("command not found: " + name);
+            return found[0];
+        }
+
+        private static string StatusText(string name)
+        {
+            return Tool("status", name).Text;
+        }
+
+        private static string[] GroupNames()
+        {
+            var names = new List<string>();
+            foreach (object item in Groups.Items) names.Add(item.ToString());
+            return names.ToArray();
+        }
+
+        private static int IndexOfGroup(string name)
+        {
+            ListBox list = Groups;
+            for (int i = 0; i < list.Items.Count; i++)
+            {
+                if (list.Items[i].ToString() == name) return i;
+            }
+            return -1;
+        }
+
+        private static int GroupCount(string name)
+        {
+            int index = IndexOfGroup(name);
+            if (index < 0) throw new Exception("no such group in the list: " + name);
+            return ((GroupItem)Groups.Items[index]).Count;
+        }
+
+        private static string[] Titles()
+        {
+            return Column(0);
+        }
+
+        private static string[] Column(int column)
+        {
+            var values = new List<string>();
+            foreach (ListViewItem item in Entries.Items) values.Add(item.SubItems[column].Text);
+            return values.ToArray();
+        }
+
+        private static string[] SelectedTitles()
+        {
+            var values = new List<string>();
+            foreach (ListViewItem item in Entries.SelectedItems) values.Add(item.Text);
+            return values.ToArray();
+        }
+
+        private static string[] SelectedIds()
+        {
+            var values = new List<string>();
+            foreach (ListViewItem item in Entries.SelectedItems) values.Add((string)item.Tag);
+            return values.ToArray();
+        }
+
+        private static string Cell(string title, int column)
+        {
+            foreach (ListViewItem item in Entries.Items)
+            {
+                if (item.Text == title) return item.SubItems[column].Text;
+            }
+            throw new Exception("no such entry in the list: " + title);
+        }
+
+        private static string[] ComboItems(ComboBox combo)
+        {
+            var values = new List<string>();
+            foreach (object item in combo.Items) values.Add(item.ToString());
+            return values.ToArray();
+        }
+
+        private static Entry FindEntry(string description)
+        {
+            foreach (Entry entry in session.Data.Entries)
+            {
+                if (entry.Description == description) return entry;
+            }
+            return null;
+        }
+
+        private static int CountOnDisk()
+        {
+            using (VaultSession copy = VaultSession.Open(vaultPath, MasterPassword))
+            {
+                return copy.Data.Entries.Count + copy.Data.Groups.Count;
+            }
+        }
+
+        private static int ReadInt32(IDataObject data, string format)
+        {
+            var stream = data.GetData(format) as Stream;
+            if (stream == null) return -1;
+            byte[] buffer = new byte[4];
+            stream.Position = 0;
+            return stream.Read(buffer, 0, 4) == 4 ? BitConverter.ToInt32(buffer, 0) : -1;
+        }
+
+        // =====================================================================
+        //  Инфраструктура
+        // =====================================================================
+
+        /// <summary>
+        /// Выполняет действие open, которое открывает модальный диалог типа T и ждёт его закрытия,
+        /// а когда диалог появится — запускает для него сценарий script. Если сценарий оставил
+        /// диалог открытым, он закрывается отменой.
+        /// </summary>
+        private static void Drive<T>(Action open, Action<T> script) where T : Form
+        {
+            Exception error = null;
+            bool handled = false;
+            int waited = 0;
+
+            var timer = new FormsTimer();
+            timer.Interval = 25;
+            timer.Tick += delegate
+            {
+                T dialog = null;
+                FormCollection forms = Application.OpenForms;
+                for (int i = forms.Count - 1; i >= 0; i--)
+                {
+                    T candidate = forms[i] as T;
+                    if (candidate != null && candidate.Visible && !driven.Contains(candidate))
+                    {
+                        dialog = candidate;
+                        break;
+                    }
+                }
+                if (dialog == null)
+                {
+                    waited += timer.Interval;
+                    return;
+                }
+
+                timer.Stop();
+                handled = true;
+                driven.Add(dialog);
+                try
+                {
+                    Pump(40);
+                    script(dialog);
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    // Сценарий не нажал ни «ОК», ни «Отмена» (например, проверял сообщение об ошибке
+                    // и вышел) — закрываем диалог отменой, иначе прогон застрянет.
+                    if (!dialog.IsDisposed && dialog.Visible && dialog.DialogResult == DialogResult.None)
+                    {
+                        WaitUntilQuiet(dialog);
+                        if (!dialog.IsDisposed && dialog.Visible && dialog.DialogResult == DialogResult.None)
+                        {
+                            dialog.DialogResult = DialogResult.Cancel;
+                            dialog.Close();
+                        }
+                    }
+                }
+            };
+
+            timer.Start();
+            try
+            {
+                open();
+            }
+            finally
+            {
+                timer.Stop();
+                timer.Dispose();
+            }
+
+            if (error != null) throw new Exception(error.Message, error);
+            if (!handled) throw new Exception("dialog " + typeof(T).Name + " did not appear (waited " + waited + " ms)");
+            Pump(40);
+        }
+
+        private static void WaitUntilQuiet(Form dialog)
+        {
+            var busyDialog = dialog as DialogForm;
+            if (busyDialog == null) return;
+            Stopwatch watch = Stopwatch.StartNew();
+            while (busyDialog.IsBusy && watch.ElapsedMilliseconds < 30000)
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
+        }
+
+        /// <summary>
+        /// Ждёт, пока диалог «решит закрыться». Модальное окно исчезает с экрана только когда
+        /// управление вернётся в его цикл сообщений, то есть после выхода из сценария, поэтому
+        /// признаком служит выставленный результат, а не видимость окна.
+        /// </summary>
+        private static void WaitDecided(Form dialog, int timeoutMs, string what)
+        {
+            WaitUntil(delegate { return dialog.IsDisposed || !dialog.Visible || dialog.DialogResult != DialogResult.None; }, timeoutMs, what);
+        }
+
+        private static void WaitUntil(Func<bool> condition, int timeoutMs, string what)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            while (!condition())
+            {
+                if (watch.ElapsedMilliseconds > timeoutMs) throw new Exception("timed out waiting for " + what);
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
+            Pump(20);
+        }
+
+        private static void Pump(int milliseconds)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            do
+            {
+                Application.DoEvents();
+                Thread.Sleep(5);
+            }
+            while (watch.ElapsedMilliseconds < milliseconds);
+        }
+
+        private static void Run(string name, Action test)
+        {
+            asyncFailure = null;
+            Exception failure = null;
+            try
+            {
+                test();
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            if (failure == null && asyncFailure != null) failure = asyncFailure;
+
+            if (failure == null)
+            {
+                passed++;
+                Console.WriteLine("ok    " + name);
+            }
+            else
+            {
+                failed++;
+                Console.WriteLine("FAIL  " + name);
+                Console.WriteLine("      " + failure.GetType().Name + ": " + failure.Message);
+                Exception inner = failure.InnerException ?? failure;
+                string[] trace = (inner.StackTrace ?? "").Split('\n');
+                for (int i = 0; i < trace.Length && i < 6; i++)
+                {
+                    Console.WriteLine("      " + trace[i].Trim());
+                }
+            }
+        }
+
+        private static void Check(bool condition, string what)
+        {
+            if (!condition) throw new Exception("check failed: " + what);
+        }
+
+        private static void SameList(string[] expected, string[] actual, string what)
+        {
+            SameList(expected, actual, what, false);
+        }
+
+        private static void SameList(string[] expected, string[] actual, string what, bool anyOrder)
+        {
+            string[] left = anyOrder ? SortedCopy(expected) : expected;
+            string[] right = anyOrder ? SortedCopy(actual) : actual;
+            bool same = left.Length == right.Length;
+            for (int i = 0; same && i < left.Length; i++)
+            {
+                if (left[i] != right[i]) same = false;
+            }
+            if (!same)
+            {
+                throw new Exception(what + ": expected [" + string.Join(" | ", expected) + "], got [" + string.Join(" | ", actual) + "]");
+            }
+        }
+
+        private static string[] SortedCopy(string[] values)
+        {
+            var copy = (string[])values.Clone();
+            Array.Sort(copy, StringComparer.Ordinal);
+            return copy;
+        }
+
+        private static int IndexOf(byte[] haystack, byte[] needle)
+        {
+            for (int i = 0; i <= haystack.Length - needle.Length; i++)
+            {
+                int j = 0;
+                while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+                if (j == needle.Length) return i;
+            }
+            return -1;
+        }
+
+        // ---------- Снимки окон ----------
+
+        private static void Shot(Form form, string name)
+        {
+            Pump(80);
+            RECT bounds;
+            GetWindowRect(form.Handle, out bounds);
+            int width = bounds.Right - bounds.Left;
+            int height = bounds.Bottom - bounds.Top;
+            if (width <= 0 || height <= 0) return;
+
+            using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.White);
+                    IntPtr hdc = g.GetHdc();
+                    try
+                    {
+                        // 2 = PW_RENDERFULLCONTENT: снимок с экрана как есть; 0 — окно рисует себя само
+                        // (годится и для окон за краем экрана).
+                        PrintWindow(form.Handle, hdc, visible ? 2 : 0);
+                    }
+                    finally
+                    {
+                        g.ReleaseHdc(hdc);
+                    }
+                }
+
+                Rectangle crop = new Rectangle(0, 0, width, height);
+                RECT frame;
+                if (visible && DwmGetWindowAttribute(form.Handle, 9, out frame, Marshal.SizeOf(typeof(RECT))) == 0)
+                {
+                    // Без невидимых полей вокруг окна, которые нужны только для захвата мышью.
+                    crop = Rectangle.Intersect(crop, new Rectangle(frame.Left - bounds.Left, frame.Top - bounds.Top, frame.Right - frame.Left, frame.Bottom - frame.Top));
+                }
+                using (Bitmap cropped = bitmap.Clone(crop, PixelFormat.Format32bppArgb))
+                {
+                    cropped.Save(Path.Combine(shotDir, name + ".png"), ImageFormat.Png);
+                }
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, int flags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int size);
+    }
+}
