@@ -27,6 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Сверка формата версии 2 с независимой реализацией (tests\interop.js) требует Argon2
+      # из Node.js 24.7 и новее, а в образах Windows Server стоит более старая версия.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
       - name: Сборка
         shell: cmd
         run: call build.cmd
