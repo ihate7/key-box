@@ -69,6 +69,13 @@ namespace KeyBox.Tests
             Run("nested groups: deleting a branch moves entries one level up", NestedGroupsDelete);
             Run("nested groups: filter and search", NestedGroupsQuery);
             Run("nested groups: file versions 1 and 2, broken links", NestedGroupsJson);
+            Run("totp: RFC 6238 known answers", TotpKnownAnswers);
+            Run("totp: key formats", TotpKeyFormats);
+            Run("model: website and one-time code key", ModelWebsiteAndTotp);
+            Run("model: password history", ModelPasswordHistory);
+            Run("model: trash", ModelTrash);
+            Run("model: settings", ModelSettings);
+            Run("model: structure version 3 only when it is needed", ModelVersion3);
             Run("json: unicode and special characters", JsonSpecialCharacters);
             Run("json: damaged and foreign data", JsonNormalisation);
             Run("localisation: plural forms, dates, language choice", LocalisationBasics);
@@ -1066,7 +1073,7 @@ namespace KeyBox.Tests
             Check(messy.Entries[1].GroupId == null, "dangling group reference is cleared");
             Check(messy.Entries[0].Id != messy.Entries[1].Id && !string.IsNullOrEmpty(messy.Entries[2].Id), "entry ids are made unique");
 
-            ExpectVaultError(VaultError.UnsupportedVersion, delegate { FromJsonText("{\"version\":3,\"groups\":[],\"entries\":[]}"); });
+            ExpectVaultError(VaultError.UnsupportedVersion, delegate { FromJsonText("{\"version\":4,\"groups\":[],\"entries\":[]}"); });
             // Не JSON или оборванный JSON — всегда ошибка формата.
             string[] broken =
             {
@@ -1130,6 +1137,282 @@ namespace KeyBox.Tests
                 // И такие данные должны нормально сохраняться обратно.
                 Check(VaultData.FromJson(data.ToJson()).Entries.Count == data.Entries.Count, "round trip for <" + text + ">");
             }
+        }
+
+        // ---------- Одноразовые коды ----------
+
+        private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        private static void TotpKnownAnswers()
+        {
+            // Приложение B из RFC 6238: восемь цифр, шаг 30 секунд.
+            long[] times = { 59, 1111111109, 1111111111, 1234567890, 2000000000, 20000000000 };
+            string[] sha1 = { "94287082", "07081804", "14050471", "89005924", "69279037", "65353130" };
+            string[] sha256 = { "46119246", "68084774", "67062674", "91819424", "90698825", "77737706" };
+            string[] sha512 = { "90693936", "25091201", "99943326", "93441116", "38618901", "47863826" };
+
+            for (int i = 0; i < times.Length; i++)
+            {
+                DateTime moment = Epoch.AddSeconds(times[i]);
+                Check(Totp.Code(TestKey("SHA1", 20), moment) == sha1[i], "SHA1 at " + times[i]);
+                Check(Totp.Code(TestKey("SHA256", 32), moment) == sha256[i], "SHA256 at " + times[i]);
+                Check(Totp.Code(TestKey("SHA512", 64), moment) == sha512[i], "SHA512 at " + times[i]);
+            }
+
+            // Обычные шесть цифр и ключ в Base32 — так его показывают сайты.
+            TotpKey key = Totp.Parse("JBSWY3DPEHPK3PXP");
+            Check(key != null && key.Digits == 6 && key.Period == 30 && key.Algorithm == "SHA1", "defaults of a plain key");
+            Check(Totp.Code(key, Epoch) == "282760", "code at the epoch: " + Totp.Code(key, Epoch));
+            Check(Totp.Code(key, Epoch.AddSeconds(1700000000)) == "324550", "code in 2023");
+            Check(Totp.Code(key, Epoch.AddSeconds(29)) == "282760" && Totp.Code(key, Epoch.AddSeconds(30)) != "282760", "the code changes every 30 seconds");
+            Check(Totp.SecondsLeft(key, Epoch) == 30 && Totp.SecondsLeft(key, Epoch.AddSeconds(29)) == 1 && Totp.SecondsLeft(key, Epoch.AddSeconds(45)) == 15, "seconds left");
+            Check(Totp.Readable("282760") == "282 760" && Totp.Readable("94287082") == "9428 7082", "readable form");
+        }
+
+        private static TotpKey TestKey(string algorithm, int length)
+        {
+            var key = new TotpKey();
+            key.Secret = Ascii("1234567890123456789012345678901234567890123456789012345678901234".Substring(0, length));
+            key.Digits = 8;
+            key.Algorithm = algorithm;
+            return key;
+        }
+
+        private static void TotpKeyFormats()
+        {
+            // Base32 по RFC 4648.
+            string[] plain = { "", "f", "fo", "foo", "foob", "fooba", "foobar" };
+            string[] encoded = { "", "MY======", "MZXQ====", "MZXW6===", "MZXW6YQ=", "MZXW6YTB", "MZXW6YTBOI======" };
+            for (int i = 0; i < plain.Length; i++)
+            {
+                Equal(Ascii(plain[i]), Totp.Base32Decode(encoded[i]));
+            }
+            Equal(Ascii("12345678901234567890"), Totp.Base32Decode("gezd gnbv-gy3t qojq GEZD GNBV GY3T QOJQ"));
+            Check(Totp.Base32Decode("MZXW6YTB0") == null && Totp.Base32Decode("MZ=XW") == null && Totp.Base32Decode("привет") == null,
+                "foreign characters are rejected");
+
+            TotpKey spaced = Totp.Parse("  jbsw y3dp ehpk 3pxp  ");
+            Check(spaced != null && Totp.Code(spaced, Epoch) == "282760", "spaces and case do not matter");
+
+            TotpKey link = Totp.Parse("otpauth://totp/Example:alice@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example&algorithm=SHA1&digits=8&period=30");
+            Check(link != null && link.Digits == 8 && Totp.Code(link, Epoch.AddSeconds(59)) == "94287082", "otpauth link");
+
+            TotpKey sha256 = Totp.Parse("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA&algorithm=sha-256&digits=8");
+            Check(sha256 != null && sha256.Algorithm == "SHA256" && Totp.Code(sha256, Epoch.AddSeconds(59)) == "46119246", "link with SHA-256");
+
+            TotpKey slow = Totp.Parse("OTPAUTH://TOTP/x?secret=JBSWY3DPEHPK3PXP&period=60");
+            Check(slow != null && slow.Period == 60 && Totp.Code(slow, Epoch.AddSeconds(59)) == Totp.Code(slow, Epoch) &&
+                  Totp.Code(slow, Epoch.AddSeconds(60)) != Totp.Code(slow, Epoch), "link with a 60-second period");
+
+            Check(Totp.Parse("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=1") == null, "counter-based codes are not supported");
+            Check(Totp.Parse("otpauth://totp/x?issuer=Example") == null, "a link without a secret");
+            Check(Totp.Parse("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=12") == null &&
+                  Totp.Parse("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0") == null &&
+                  Totp.Parse("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=MD5") == null, "unsupported parameters");
+            Check(Totp.Parse("") == null && Totp.Parse(null) == null && Totp.Parse("ABC") == null &&
+                  Totp.Parse("не ключ") == null && Totp.Parse("hello world!") == null, "garbage is rejected");
+        }
+
+        // ---------- Модель: возможности версии 3 ----------
+
+        private static void ModelWebsiteAndTotp()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            var fields = new EntryFields();
+            fields.Login = "alice";
+            fields.Password = "p1";
+            fields.Description = "Почта";
+            fields.Url = "  https://mail.example.com/login  ";
+            fields.Totp = " JBSW Y3DP EHPK 3PXP ";
+            Entry entry = data.AddEntry(fields);
+            Check(entry.Url == "https://mail.example.com/login" && entry.Totp == "JBSW Y3DP EHPK 3PXP", "optional fields are trimmed");
+
+            Entry plain = data.AddEntry(null, "bob", "p2", "Без сайта");
+            Check(plain.Url == null && plain.Totp == null, "optional fields are absent by default");
+
+            fields.Totp = "это не ключ";
+            ExpectValidation(delegate { data.AddEntry(fields); });
+            fields.Totp = null;
+            fields.Url = new string('x', VaultData.MaxUrlLength + 1);
+            ExpectValidation(delegate { data.AddEntry(fields); });
+            Check(data.Entries.Count == 2, "invalid entries are not added");
+
+            // Прежний вызов без новых полей их не стирает.
+            Check(data.UpdateEntry(entry.Id, null, "alice", "p1", "Почта рабочая"), "an update through the short call");
+            Check(entry.Url == "https://mail.example.com/login" && entry.Totp != null, "the short call keeps the website and the key");
+
+            var changed = new EntryFields();
+            changed.Login = "alice";
+            changed.Password = "p1";
+            changed.Description = "Почта рабочая";
+            changed.Url = "mail.example.com";
+            changed.Totp = "";
+            Check(data.UpdateEntry(entry.Id, changed), "website and key are updated");
+            Check(entry.Url == "mail.example.com" && entry.Totp == null, "an empty key removes it");
+            Check(!data.UpdateEntry(entry.Id, changed), "the same values again are not a change");
+
+            Check(data.Query(GroupFilter.All, "MAIL.example").Count == 1 && data.Query(GroupFilter.All, "example bob").Count == 0,
+                "search looks into the website");
+
+            VaultData copy = VaultData.FromJson(data.ToJson());
+            Entry restored = copy.FindEntry(entry.Id);
+            Check(copy.Version == 3 && restored.Url == "mail.example.com" && restored.Totp == null, "the website survives a round trip, structure version is 3");
+            string json = Encoding.UTF8.GetString(data.ToJson());
+            Check(json.Contains("\"url\":\"mail.example.com\"") && !json.Contains("\"totp\""), "empty optional fields are not written: " + json);
+        }
+
+        private static void ModelPasswordHistory()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Entry entry = data.AddEntry(null, "user", "first", "Сервис");
+            Check(entry.History == null, "no history at the start");
+
+            data.UpdateEntry(entry.Id, null, "user", "first", "Сервис — описание изменено");
+            Check(entry.History == null, "editing other fields does not add history");
+
+            data.UpdateEntry(entry.Id, null, "user", "second", "Сервис");
+            data.UpdateEntry(entry.Id, null, "user", "third", "Сервис");
+            Check(entry.History != null && entry.History.Count == 2, "two previous passwords");
+            Check(entry.History[0].Password == "second" && entry.History[1].Password == "first", "newest first");
+            DateTime replaced;
+            Check(VaultData.TryParseUtc(entry.History[0].Replaced, out replaced), "the time of the replacement is recorded");
+
+            // Пустой пароль не запоминается.
+            Entry empty = data.AddEntry(null, "nobody", "", "Без пароля");
+            data.UpdateEntry(empty.Id, null, "nobody", "now set", "Без пароля");
+            Check(empty.History == null, "an empty previous password is not kept");
+
+            for (int i = 0; i < VaultData.MaxHistory + 5; i++)
+            {
+                data.UpdateEntry(entry.Id, null, "user", "password " + i, "Сервис");
+            }
+            Check(entry.History.Count == VaultData.MaxHistory, "history is limited: " + entry.History.Count);
+            Check(entry.History[0].Password == "password " + (VaultData.MaxHistory + 3), "the latest replaced password is first");
+
+            VaultData copy = VaultData.FromJson(data.ToJson());
+            Check(copy.Version == 3 && copy.FindEntry(entry.Id).History.Count == VaultData.MaxHistory, "history survives a round trip");
+
+            Check(data.ClearHistory(entry.Id) && entry.History == null && !data.ClearHistory(entry.Id), "history can be cleared");
+        }
+
+        private static void ModelTrash()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            Group projects = data.AddGroup("Проекты", work.Id);
+            Entry a = data.AddEntry(work.Id, "a", "1", "A");
+            Entry b = data.AddEntry(projects.Id, "b", "2", "B");
+            Entry c = data.AddEntry(null, "c", "3", "C");
+
+            Check(data.TrashEntries(new[] { a.Id, b.Id, "nope" }) == 2, "two entries go to the trash");
+            Check(a.IsDeleted && b.IsDeleted && !c.IsDeleted, "trash marks");
+            Check(data.Entries.Count == 3 && data.LiveCount == 1 && data.TrashCount == 2, "entries stay in the vault: counts");
+            Check(data.TrashEntries(new[] { a.Id }) == 0, "already in the trash");
+
+            // Удалённое не видно нигде, кроме корзины.
+            Check(data.Query(GroupFilter.All, null).Count == 1 && data.Query(GroupFilter.ForGroup(work.Id), null).Count == 0,
+                "the lists do not show deleted entries");
+            Check(data.Query(GroupFilter.All, "a").Count == 0, "search does not find deleted entries");
+            Check(data.Query(GroupFilter.Trash, null).Count == 2 && data.Query(GroupFilter.Trash, "b").Count == 1, "the trash shows them and can be searched");
+            int ungrouped;
+            Dictionary<string, int> counts = data.CountByGroup(out ungrouped);
+            Check(counts[work.Id] == 0 && counts[projects.Id] == 0 && ungrouped == 1 && data.CountInBranch(work.Id) == 0, "counters skip deleted entries");
+            Check(data.MoveEntries(new[] { a.Id }, null) == 0 && a.GroupId == work.Id, "deleted entries cannot be moved");
+
+            // Восстановление возвращает на прежнее место.
+            Check(data.RestoreEntries(new[] { a.Id, c.Id }) == 1 && !a.IsDeleted && a.GroupId == work.Id, "restore");
+
+            // Группа удалена, пока запись лежит в корзине: после восстановления запись окажется уровнем выше.
+            Check(data.DeleteGroup(projects.Id) == 0, "no live entries were in the deleted group");
+            Check(b.GroupId == work.Id, "the deleted entry follows the entries of its group");
+            data.RestoreEntries(new[] { b.Id });
+            Check(data.Query(GroupFilter.ForGroup(work.Id), null).Count == 2, "restored into the parent group");
+
+            // Окончательное удаление оставляет следы: группа «Проекты» и две записи.
+            data.TrashEntries(new[] { a.Id, b.Id });
+            Check(data.DeleteEntries(new[] { a.Id }) == 1 && data.FindEntry(a.Id) == null, "permanent delete of one entry");
+            Check(data.EmptyTrash() == 1 && data.Entries.Count == 1 && data.TrashCount == 0, "empty the trash");
+            Check(data.Removed != null && data.Removed.Count == 3, "permanent deletions leave tombstones: " + (data.Removed == null ? 0 : data.Removed.Count));
+
+            // Срок хранения.
+            Entry old = data.AddEntry(null, "old", "", "Старая");
+            Entry recent = data.AddEntry(null, "recent", "", "Недавняя");
+            data.TrashEntries(new[] { old.Id, recent.Id });
+            old.Deleted = "2026-01-01T00:00:00Z";
+            recent.Deleted = "2026-01-25T00:00:00Z";
+            DateTime now = new DateTime(2026, 1, 31, 0, 0, 0, DateTimeKind.Utc);
+            Check(data.PurgeTrash(VaultData.TrashDays, now) == 1 && data.FindEntry(old.Id) == null && data.FindEntry(recent.Id) != null,
+                "entries older than the limit are purged");
+            Check(data.PurgeTrash(VaultData.TrashDays, now) == 0, "nothing more to purge");
+
+            VaultData copy = VaultData.FromJson(data.ToJson());
+            Check(copy.Version == 3 && copy.TrashCount == 1 && copy.FindEntry(recent.Id).IsDeleted, "the trash survives a round trip");
+            Check(copy.Removed != null && copy.Removed.Count == data.Removed.Count, "tombstones survive a round trip");
+        }
+
+        private static void ModelSettings()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            VaultSettings defaults = data.EffectiveSettings;
+            Check(data.Settings == null && defaults.AutoLockMinutes == 5 && defaults.ClipboardSeconds == 30 && defaults.PasswordLength == 20, "defaults");
+            Check(defaults.PasswordUpper && defaults.PasswordLower && defaults.PasswordDigits && defaults.PasswordSymbols &&
+                  defaults.PasswordNoLookAlikes && defaults.AutoTypeEnter && defaults.Language == null, "default switches");
+
+            Check(!data.UpdateSettings(defaults) && data.Settings == null, "saving the defaults stores nothing");
+            Check(VaultData.FromJson(data.ToJson()).Version == 1, "and does not raise the structure version");
+
+            VaultSettings custom = data.EffectiveSettings;
+            custom.AutoLockMinutes = 15;
+            custom.Language = "en";
+            custom.PasswordSymbols = false;
+            Check(data.UpdateSettings(custom) && data.Settings != null, "changed settings are stored");
+            Check(!data.UpdateSettings(custom), "the same settings again are not a change");
+            custom.AutoLockMinutes = 99;
+            Check(data.EffectiveSettings.AutoLockMinutes == 15, "the stored settings are a copy");
+
+            VaultData copy = VaultData.FromJson(data.ToJson());
+            VaultSettings restored = copy.EffectiveSettings;
+            Check(copy.Version == 3 && restored.AutoLockMinutes == 15 && restored.Language == "en" && !restored.PasswordSymbols && restored.PasswordUpper,
+                "settings survive a round trip");
+
+            // Значения из чужого или испорченного файла приводятся к допустимым.
+            VaultData messy = FromJsonText("{\"version\":3,\"groups\":[],\"entries\":[],\"settings\":{\"language\":\"xx\",\"autoLockMinutes\":-5,\"clipboardSeconds\":100000,\"passwordLength\":1}}");
+            VaultSettings fixedUp = messy.EffectiveSettings;
+            Check(fixedUp.Language == null && fixedUp.AutoLockMinutes == 0 && fixedUp.ClipboardSeconds == VaultSettings.MaxClipboardSeconds &&
+                  fixedUp.PasswordLength == VaultSettings.MinPasswordLength, "out-of-range values are clamped");
+            Check(fixedUp.PasswordUpper && fixedUp.PasswordLower && fixedUp.PasswordDigits, "some character classes always stay enabled");
+        }
+
+        private static void ModelVersion3()
+        {
+            // Служебные отметки (время изменения групп, следы удалённого) версию не повышают.
+            VaultData data = VaultData.CreateEmpty();
+            Group group = data.AddGroup("Работа");
+            Group other = data.AddGroup("Лишняя");
+            Entry entry = data.AddEntry(group.Id, "a", "1", "A");
+            Entry gone = data.AddEntry(null, "b", "2", "B");
+            data.DeleteGroup(other.Id);
+            data.DeleteEntries(new[] { gone.Id });
+            Check(group.Changed != null && data.Removed != null && data.Removed.Count == 2, "service marks are present");
+            VaultData copy = VaultData.FromJson(data.ToJson());
+            Check(copy.Version == 1, "a vault without the new features keeps structure version 1: " + copy.Version);
+            Check(copy.Removed != null && copy.Removed.Count == 2 && copy.Groups[0].Changed == group.Changed, "the marks are kept");
+
+            // Вложенные группы — версия 2, новые поля записей — версия 3.
+            data.AddGroup("Проекты", group.Id);
+            Check(VaultData.FromJson(data.ToJson()).Version == 2, "nested groups need version 2");
+            data.TrashEntries(new[] { entry.Id });
+            Check(VaultData.FromJson(data.ToJson()).Version == 3, "the trash needs version 3");
+            data.RestoreEntries(new[] { entry.Id });
+            Check(VaultData.FromJson(data.ToJson()).Version == 2, "and an empty trash does not");
+
+            // Файл от прежней версии программы читается как раньше.
+            VaultData old = FromJsonText("{\"version\":2,\"groups\":[{\"id\":\"g1\",\"name\":\"A\"},{\"id\":\"g2\",\"name\":\"B\",\"parentId\":\"g1\"}]," +
+                                         "\"entries\":[{\"id\":\"e1\",\"groupId\":\"g2\",\"login\":\"l\",\"password\":\"p\",\"description\":\"d\"}]}");
+            Entry first = old.Entries[0];
+            Check(first.Url == null && first.Totp == null && first.History == null && !first.IsDeleted && old.Settings == null && old.Removed == null,
+                "the new fields are simply absent in an old file");
+            Check(old.LiveCount == 1 && old.EffectiveSettings.AutoLockMinutes == 5, "an old file works with the defaults");
         }
 
         // ---------- Язык интерфейса ----------

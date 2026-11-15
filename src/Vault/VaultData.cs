@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
+using KeyBox.Crypto;
 
 namespace KeyBox.Vault
 {
@@ -29,6 +30,13 @@ namespace KeyBox.Vault
         /// </summary>
         [DataMember(Name = "parentId", Order = 2, EmitDefaultValue = false)]
         public string ParentId { get; set; }
+
+        /// <summary>
+        /// Время последнего изменения группы (название, место в дереве), UTC, ISO 8601.
+        /// Нужно при объединении двух копий хранилища: побеждает более позднее изменение.
+        /// </summary>
+        [DataMember(Name = "changed", Order = 3, EmitDefaultValue = false)]
+        public string Changed { get; set; }
     }
 
     /// <summary>Запись: логин, пароль, описание и группа, в которой она лежит.</summary>
@@ -59,16 +67,186 @@ namespace KeyBox.Vault
         /// <summary>Время последнего изменения логина, пароля или описания, UTC, ISO 8601.</summary>
         [DataMember(Name = "modified", Order = 6)]
         public string Modified { get; set; }
+
+        /// <summary>Адрес сайта или сервиса; null, если не задан.</summary>
+        [DataMember(Name = "url", Order = 7, EmitDefaultValue = false)]
+        public string Url { get; set; }
+
+        /// <summary>
+        /// Ключ одноразовых кодов (TOTP): строка Base32 или ссылка otpauth://; null, если не задан.
+        /// </summary>
+        [DataMember(Name = "totp", Order = 8, EmitDefaultValue = false)]
+        public string Totp { get; set; }
+
+        /// <summary>Прежние пароли записи, от нового к старому; null, если пароль не менялся.</summary>
+        [DataMember(Name = "history", Order = 9, EmitDefaultValue = false)]
+        public List<PasswordRecord> History { get; set; }
+
+        /// <summary>Когда запись удалена в корзину, UTC, ISO 8601; null — запись не удалена.</summary>
+        [DataMember(Name = "deleted", Order = 10, EmitDefaultValue = false)]
+        public string Deleted { get; set; }
+
+        /// <summary>
+        /// Время последнего изменения любого рода (содержимое, группа, корзина), UTC, ISO 8601.
+        /// Нужно при объединении двух копий хранилища: побеждает более позднее изменение.
+        /// </summary>
+        [DataMember(Name = "changed", Order = 11, EmitDefaultValue = false)]
+        public string Changed { get; set; }
+
+        /// <summary>true, если запись лежит в корзине.</summary>
+        public bool IsDeleted
+        {
+            get { return !string.IsNullOrEmpty(Deleted); }
+        }
+    }
+
+    /// <summary>Прежний пароль записи.</summary>
+    [DataContract]
+    internal sealed class PasswordRecord
+    {
+        [DataMember(Name = "password", Order = 0)]
+        public string Password { get; set; }
+
+        /// <summary>Когда этот пароль был заменён следующим, UTC, ISO 8601.</summary>
+        [DataMember(Name = "replaced", Order = 1)]
+        public string Replaced { get; set; }
+    }
+
+    /// <summary>
+    /// След окончательно удалённой записи или группы. При объединении двух копий хранилища
+    /// он не даёт удалённому «воскреснуть» из той копии, где удаления ещё не было.
+    /// </summary>
+    [DataContract]
+    internal sealed class Tombstone
+    {
+        [DataMember(Name = "id", Order = 0)]
+        public string Id { get; set; }
+
+        [DataMember(Name = "when", Order = 1)]
+        public string When { get; set; }
+    }
+
+    /// <summary>Настройки, которые хранятся внутри хранилища и переезжают вместе с ним.</summary>
+    [DataContract]
+    internal sealed class VaultSettings
+    {
+        public const int MinPasswordLength = 6;
+        public const int MaxPasswordLength = 128;
+        public const int MaxAutoLockMinutes = 600;
+        public const int MinClipboardSeconds = 5;
+        public const int MaxClipboardSeconds = 600;
+
+        /// <summary>"ru", "en" или null — как в системе.</summary>
+        [DataMember(Name = "language", Order = 0, EmitDefaultValue = false)]
+        public string Language { get; set; }
+
+        /// <summary>Через сколько минут бездействия блокировать хранилище; 0 — не блокировать.</summary>
+        [DataMember(Name = "autoLockMinutes", Order = 1)]
+        public int AutoLockMinutes { get; set; }
+
+        /// <summary>Через сколько секунд очищать буфер обмена после копирования.</summary>
+        [DataMember(Name = "clipboardSeconds", Order = 2)]
+        public int ClipboardSeconds { get; set; }
+
+        [DataMember(Name = "passwordLength", Order = 3)]
+        public int PasswordLength { get; set; }
+
+        [DataMember(Name = "passwordUpper", Order = 4)]
+        public bool PasswordUpper { get; set; }
+
+        [DataMember(Name = "passwordLower", Order = 5)]
+        public bool PasswordLower { get; set; }
+
+        [DataMember(Name = "passwordDigits", Order = 6)]
+        public bool PasswordDigits { get; set; }
+
+        [DataMember(Name = "passwordSymbols", Order = 7)]
+        public bool PasswordSymbols { get; set; }
+
+        /// <summary>Не использовать похожие друг на друга символы: O и 0, l и 1.</summary>
+        [DataMember(Name = "passwordNoLookAlikes", Order = 8)]
+        public bool PasswordNoLookAlikes { get; set; }
+
+        /// <summary>Нажимать Enter после автоввода логина и пароля.</summary>
+        [DataMember(Name = "autoTypeEnter", Order = 9)]
+        public bool AutoTypeEnter { get; set; }
+
+        /// <summary>Время последнего изменения настроек, UTC, ISO 8601 (для объединения копий).</summary>
+        [DataMember(Name = "changed", Order = 10, EmitDefaultValue = false)]
+        public string Changed { get; set; }
+
+        public static VaultSettings Defaults()
+        {
+            var settings = new VaultSettings();
+            settings.AutoLockMinutes = 5;
+            settings.ClipboardSeconds = 30;
+            settings.PasswordLength = 20;
+            settings.PasswordUpper = true;
+            settings.PasswordLower = true;
+            settings.PasswordDigits = true;
+            settings.PasswordSymbols = true;
+            settings.PasswordNoLookAlikes = true;
+            settings.AutoTypeEnter = true;
+            return settings;
+        }
+
+        public VaultSettings Clone()
+        {
+            return (VaultSettings)MemberwiseClone();
+        }
+
+        /// <summary>true, если все значения (кроме времени изменения) совпадают.</summary>
+        public bool SameAs(VaultSettings other)
+        {
+            return other != null &&
+                   (Language ?? "") == (other.Language ?? "") &&
+                   AutoLockMinutes == other.AutoLockMinutes &&
+                   ClipboardSeconds == other.ClipboardSeconds &&
+                   PasswordLength == other.PasswordLength &&
+                   PasswordUpper == other.PasswordUpper &&
+                   PasswordLower == other.PasswordLower &&
+                   PasswordDigits == other.PasswordDigits &&
+                   PasswordSymbols == other.PasswordSymbols &&
+                   PasswordNoLookAlikes == other.PasswordNoLookAlikes &&
+                   AutoTypeEnter == other.AutoTypeEnter;
+        }
+
+        /// <summary>Приводит значения, прочитанные из файла, к допустимым границам.</summary>
+        public void Normalize()
+        {
+            if (Language != "ru" && Language != "en") Language = null;
+            AutoLockMinutes = Math.Max(0, Math.Min(MaxAutoLockMinutes, AutoLockMinutes));
+            ClipboardSeconds = Math.Max(MinClipboardSeconds, Math.Min(MaxClipboardSeconds, ClipboardSeconds));
+            PasswordLength = Math.Max(MinPasswordLength, Math.Min(MaxPasswordLength, PasswordLength));
+            if (!PasswordUpper && !PasswordLower && !PasswordDigits && !PasswordSymbols)
+            {
+                PasswordUpper = true;
+                PasswordLower = true;
+                PasswordDigits = true;
+            }
+        }
+    }
+
+    /// <summary>Поля записи, которые вводит пользователь.</summary>
+    internal sealed class EntryFields
+    {
+        public string GroupId;
+        public string Login;
+        public string Password;
+        public string Description;
+        public string Url;
+        public string Totp;
     }
 
     internal enum FilterKind
     {
         All,
         Ungrouped,
-        Group
+        Group,
+        Trash
     }
 
-    /// <summary>Какую часть записей показывать: все, без группы или одну группу.</summary>
+    /// <summary>Какую часть записей показывать: все, без группы, одну группу или корзину.</summary>
     internal struct GroupFilter
     {
         public readonly FilterKind Kind;
@@ -90,6 +268,12 @@ namespace KeyBox.Vault
             get { return new GroupFilter(FilterKind.Ungrouped, null); }
         }
 
+        /// <summary>Корзина: записи, удалённые пользователем, но ещё не стёртые окончательно.</summary>
+        public static GroupFilter Trash
+        {
+            get { return new GroupFilter(FilterKind.Trash, null); }
+        }
+
         public static GroupFilter ForGroup(string groupId)
         {
             return new GroupFilter(FilterKind.Group, groupId);
@@ -103,6 +287,9 @@ namespace KeyBox.Vault
 
         public bool Matches(Entry entry)
         {
+            // Удалённые записи видны только в корзине, а в корзине нет ничего другого.
+            if (entry.IsDeleted || Kind == FilterKind.Trash) return entry.IsDeleted && Kind == FilterKind.Trash;
+
             switch (Kind)
             {
                 case FilterKind.Ungrouped:
@@ -128,12 +315,13 @@ namespace KeyBox.Vault
     internal sealed class VaultData
     {
         /// <summary>
-        /// Версия структуры данных. 1 — группы одним списком, 2 — группы могут быть вложенными.
-        /// Файл помечается версией 2, только если вложенность действительно используется:
-        /// так хранилище без вложенных групп по-прежнему открывается программой версии 1.0,
-        /// а с вложенными она честно откажется открывать, вместо того чтобы потерять структуру.
+        /// Версия структуры данных. 1 — группы одним списком; 2 — группы могут быть вложенными;
+        /// 3 — у записей есть адрес сайта, одноразовые коды, история паролей и корзина, у хранилища —
+        /// настройки. Файл помечается наименьшей версией, которой хватает для его содержимого:
+        /// так хранилище без новых возможностей по-прежнему открывается прежними версиями программы,
+        /// а с новыми они честно откажутся его открывать, вместо того чтобы потерять данные.
         /// </summary>
-        public const int CurrentVersion = 2;
+        public const int CurrentVersion = 3;
 
         public const int MaxGroupNameLength = 100;
 
@@ -146,6 +334,14 @@ namespace KeyBox.Vault
         public const int MaxLoginLength = 1000;
         public const int MaxPasswordLength = 1000;
         public const int MaxDescriptionLength = 10000;
+        public const int MaxUrlLength = 2000;
+        public const int MaxTotpLength = 1000;
+
+        /// <summary>Сколько прежних паролей хранится у записи.</summary>
+        public const int MaxHistory = 10;
+
+        /// <summary>Сколько дней удалённая запись лежит в корзине, прежде чем стереться окончательно.</summary>
+        public const int TrashDays = 30;
 
         private static readonly char[] Whitespace = { ' ', '\t', '\r', '\n' };
 
@@ -157,6 +353,14 @@ namespace KeyBox.Vault
 
         [DataMember(Name = "entries", Order = 2)]
         public List<Entry> Entries { get; set; }
+
+        /// <summary>Настройки; null — всё по умолчанию.</summary>
+        [DataMember(Name = "settings", Order = 3, EmitDefaultValue = false)]
+        public VaultSettings Settings { get; set; }
+
+        /// <summary>Следы окончательно удалённых записей и групп (для объединения копий); может быть null.</summary>
+        [DataMember(Name = "removed", Order = 4, EmitDefaultValue = false)]
+        public List<Tombstone> Removed { get; set; }
 
         public static VaultData CreateEmpty()
         {
@@ -356,6 +560,7 @@ namespace KeyBox.Vault
             group.Id = NewId();
             group.Name = name.Trim();
             group.ParentId = NormalizeId(parentId);
+            group.Changed = Timestamp();
             Groups.Add(group);
             return group;
         }
@@ -375,6 +580,7 @@ namespace KeyBox.Vault
             bool changed = group.Name != newName || group.ParentId != parent;
             group.Name = newName;
             group.ParentId = parent;
+            if (changed) group.Changed = Timestamp();
             return changed;
         }
 
@@ -399,7 +605,7 @@ namespace KeyBox.Vault
             int count = 0;
             foreach (Entry entry in Entries)
             {
-                if (entry.GroupId != null && branch.Contains(entry.GroupId)) count++;
+                if (!entry.IsDeleted && entry.GroupId != null && branch.Contains(entry.GroupId)) count++;
             }
             return count;
         }
@@ -417,15 +623,20 @@ namespace KeyBox.Vault
             foreach (Group descendant in DescendantsOf(group.Id)) removed.Add(descendant.Id);
 
             string destination = group.ParentId;
+            string now = Timestamp();
             int released = 0;
             foreach (Entry entry in Entries)
             {
                 if (entry.GroupId != null && removed.Contains(entry.GroupId))
                 {
+                    // Записи из корзины тоже переезжают (иначе после восстановления им некуда вернуться),
+                    // но в счёт не идут: пользователь их сейчас не видит.
                     entry.GroupId = destination;
-                    released++;
+                    entry.Changed = now;
+                    if (!entry.IsDeleted) released++;
                 }
             }
+            foreach (string removedId in removed) AddTombstone(removedId, now);
             Groups.RemoveAll(delegate(Group candidate) { return removed.Contains(candidate.Id); });
             return released;
         }
@@ -441,6 +652,7 @@ namespace KeyBox.Vault
             ungrouped = 0;
             foreach (Entry entry in Entries)
             {
+                if (entry.IsDeleted) continue;
                 int current;
                 if (!string.IsNullOrEmpty(entry.GroupId) && counts.TryGetValue(entry.GroupId, out current))
                 {
@@ -466,77 +678,262 @@ namespace KeyBox.Vault
             return null;
         }
 
+        /// <summary>Число записей вне корзины.</summary>
+        public int LiveCount
+        {
+            get
+            {
+                int count = 0;
+                foreach (Entry entry in Entries)
+                {
+                    if (!entry.IsDeleted) count++;
+                }
+                return count;
+            }
+        }
+
+        /// <summary>Число записей в корзине.</summary>
+        public int TrashCount
+        {
+            get { return Entries.Count - LiveCount; }
+        }
+
         /// <summary>Проверяет поля записи. Возвращает текст ошибки или null.</summary>
         public static string ValidateEntry(string login, string password, string description)
         {
-            if (IsBlank(login) && IsBlank(description))
+            var fields = new EntryFields();
+            fields.Login = login;
+            fields.Password = password;
+            fields.Description = description;
+            return ValidateEntry(fields);
+        }
+
+        /// <summary>Проверяет поля записи. Возвращает текст ошибки или null.</summary>
+        public static string ValidateEntry(EntryFields fields)
+        {
+            if (fields == null) throw new ArgumentNullException("fields");
+
+            if (IsBlank(fields.Login) && IsBlank(fields.Description))
             {
                 return L.T("Заполните описание или логин.", "Fill in the description or the username.");
             }
-            if ((login ?? "").Length > MaxLoginLength)
+            if ((fields.Login ?? "").Length > MaxLoginLength)
             {
                 return L.F("Логин не должен быть длиннее {0} символов.", "The username cannot be longer than {0} characters.", MaxLoginLength);
             }
-            if ((password ?? "").Length > MaxPasswordLength)
+            if ((fields.Password ?? "").Length > MaxPasswordLength)
             {
                 return L.F("Пароль не должен быть длиннее {0} символов.", "The password cannot be longer than {0} characters.", MaxPasswordLength);
             }
-            if ((description ?? "").Length > MaxDescriptionLength)
+            if ((fields.Description ?? "").Length > MaxDescriptionLength)
             {
                 return L.F("Описание не должно быть длиннее {0} символов.", "The description cannot be longer than {0} characters.", MaxDescriptionLength);
+            }
+            if ((fields.Url ?? "").Trim().Length > MaxUrlLength)
+            {
+                return L.F("Адрес сайта не должен быть длиннее {0} символов.", "The website address cannot be longer than {0} characters.", MaxUrlLength);
+            }
+
+            string totp = (fields.Totp ?? "").Trim();
+            if (totp.Length > MaxTotpLength || (totp.Length > 0 && Totp.Parse(totp) == null))
+            {
+                return L.T("Ключ одноразовых кодов не распознан. Нужен ключ из букв A–Z и цифр 2–7 или ссылка otpauth://.",
+                           "The one-time code key is not recognised. Enter a key made of letters A–Z and digits 2–7, or an otpauth:// link.");
             }
             return null;
         }
 
         public Entry AddEntry(string groupId, string login, string password, string description)
         {
-            string error = ValidateEntry(login, password, description);
+            var fields = new EntryFields();
+            fields.GroupId = groupId;
+            fields.Login = login;
+            fields.Password = password;
+            fields.Description = description;
+            return AddEntry(fields);
+        }
+
+        public Entry AddEntry(EntryFields fields)
+        {
+            string error = ValidateEntry(fields);
             if (error != null) throw new ValidationException(error);
 
             string now = Timestamp();
             var entry = new Entry();
             entry.Id = NewId();
-            entry.GroupId = ResolveGroupId(groupId);
-            entry.Login = CleanLine(login);
-            entry.Password = password ?? "";
-            entry.Description = CleanText(description);
+            entry.GroupId = ResolveGroupId(fields.GroupId);
+            entry.Login = CleanLine(fields.Login);
+            entry.Password = fields.Password ?? "";
+            entry.Description = CleanText(fields.Description);
+            entry.Url = CleanOptional(fields.Url);
+            entry.Totp = CleanOptional(fields.Totp);
             entry.Created = now;
             entry.Modified = now;
+            entry.Changed = now;
             Entries.Add(entry);
             return entry;
         }
 
-        /// <summary>Обновляет запись. Возвращает true, если что-нибудь действительно изменилось.</summary>
+        /// <summary>
+        /// Обновляет группу, логин, пароль и описание записи; адрес сайта и ключ одноразовых кодов
+        /// остаются прежними. Возвращает true, если что-нибудь действительно изменилось.
+        /// </summary>
         public bool UpdateEntry(string id, string groupId, string login, string password, string description)
         {
             Entry entry = RequireEntry(id);
-            string error = ValidateEntry(login, password, description);
+            var fields = new EntryFields();
+            fields.GroupId = groupId;
+            fields.Login = login;
+            fields.Password = password;
+            fields.Description = description;
+            fields.Url = entry.Url;
+            fields.Totp = entry.Totp;
+            return UpdateEntry(id, fields);
+        }
+
+        /// <summary>
+        /// Обновляет запись. Прежний пароль при замене уходит в историю записи.
+        /// Возвращает true, если что-нибудь действительно изменилось.
+        /// </summary>
+        public bool UpdateEntry(string id, EntryFields fields)
+        {
+            Entry entry = RequireEntry(id);
+            string error = ValidateEntry(fields);
             if (error != null) throw new ValidationException(error);
 
-            string newGroupId = ResolveGroupId(groupId);
-            string newLogin = CleanLine(login);
-            string newPassword = password ?? "";
-            string newDescription = CleanText(description);
+            string newGroupId = ResolveGroupId(fields.GroupId);
+            string newLogin = CleanLine(fields.Login);
+            string newPassword = fields.Password ?? "";
+            string newDescription = CleanText(fields.Description);
+            string newUrl = CleanOptional(fields.Url);
+            string newTotp = CleanOptional(fields.Totp);
 
-            bool contentChanged = entry.Login != newLogin || entry.Password != newPassword || entry.Description != newDescription;
+            bool contentChanged = entry.Login != newLogin || entry.Password != newPassword || entry.Description != newDescription ||
+                                  entry.Url != newUrl || entry.Totp != newTotp;
             bool groupChanged = entry.GroupId != newGroupId;
+            if (!contentChanged && !groupChanged) return false;
 
+            string now = Timestamp();
             entry.GroupId = newGroupId;
             if (contentChanged)
             {
+                if (entry.Password != newPassword) RememberPassword(entry, entry.Password, now);
                 entry.Login = newLogin;
                 entry.Password = newPassword;
                 entry.Description = newDescription;
-                entry.Modified = Timestamp();
+                entry.Url = newUrl;
+                entry.Totp = newTotp;
+                entry.Modified = now;
             }
-            return contentChanged || groupChanged;
+            entry.Changed = now;
+            return true;
         }
 
-        /// <summary>Удаляет записи. Возвращает число удалённых.</summary>
+        /// <summary>Прежний пароль уходит в историю записи. Пустой пароль не запоминается.</summary>
+        private static void RememberPassword(Entry entry, string password, string when)
+        {
+            if (string.IsNullOrEmpty(password)) return;
+            if (entry.History == null) entry.History = new List<PasswordRecord>();
+
+            var record = new PasswordRecord();
+            record.Password = password;
+            record.Replaced = when;
+            entry.History.Insert(0, record);
+            if (entry.History.Count > MaxHistory)
+            {
+                entry.History.RemoveRange(MaxHistory, entry.History.Count - MaxHistory);
+            }
+        }
+
+        /// <summary>Стирает историю паролей записи. Возвращает true, если было что стирать.</summary>
+        public bool ClearHistory(string id)
+        {
+            Entry entry = RequireEntry(id);
+            if (entry.History == null || entry.History.Count == 0) return false;
+            entry.History = null;
+            entry.Changed = Timestamp();
+            return true;
+        }
+
+        /// <summary>Перемещает записи в корзину. Возвращает число перемещённых.</summary>
+        public int TrashEntries(IEnumerable<string> ids)
+        {
+            var set = new HashSet<string>(ids);
+            string now = Timestamp();
+            int count = 0;
+            foreach (Entry entry in Entries)
+            {
+                if (set.Contains(entry.Id) && !entry.IsDeleted)
+                {
+                    entry.Deleted = now;
+                    entry.Changed = now;
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        /// <summary>Возвращает записи из корзины на прежнее место. Возвращает число восстановленных.</summary>
+        public int RestoreEntries(IEnumerable<string> ids)
+        {
+            var set = new HashSet<string>(ids);
+            string now = Timestamp();
+            int count = 0;
+            foreach (Entry entry in Entries)
+            {
+                if (set.Contains(entry.Id) && entry.IsDeleted)
+                {
+                    entry.Deleted = null;
+                    entry.Changed = now;
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        /// <summary>Удаляет записи окончательно, минуя корзину. Возвращает число удалённых.</summary>
         public int DeleteEntries(IEnumerable<string> ids)
         {
             var set = new HashSet<string>(ids);
-            return Entries.RemoveAll(delegate(Entry entry) { return set.Contains(entry.Id); });
+            string now = Timestamp();
+            int removed = 0;
+            for (int i = Entries.Count - 1; i >= 0; i--)
+            {
+                if (!set.Contains(Entries[i].Id)) continue;
+                AddTombstone(Entries[i].Id, now);
+                Entries.RemoveAt(i);
+                removed++;
+            }
+            return removed;
+        }
+
+        /// <summary>Окончательно удаляет всё, что лежит в корзине. Возвращает число удалённых записей.</summary>
+        public int EmptyTrash()
+        {
+            var ids = new List<string>();
+            foreach (Entry entry in Entries)
+            {
+                if (entry.IsDeleted) ids.Add(entry.Id);
+            }
+            return DeleteEntries(ids);
+        }
+
+        /// <summary>
+        /// Окончательно удаляет записи, пролежавшие в корзине не меньше указанного числа дней.
+        /// Возвращает число удалённых.
+        /// </summary>
+        public int PurgeTrash(int days, DateTime utcNow)
+        {
+            var ids = new List<string>();
+            foreach (Entry entry in Entries)
+            {
+                DateTime deleted;
+                if (entry.IsDeleted && TryParseUtc(entry.Deleted, out deleted) && (utcNow - deleted).TotalDays >= days)
+                {
+                    ids.Add(entry.Id);
+                }
+            }
+            return DeleteEntries(ids);
         }
 
         /// <summary>
@@ -547,16 +944,55 @@ namespace KeyBox.Vault
         {
             string target = ResolveGroupId(groupId);
             var set = new HashSet<string>(ids);
+            string now = Timestamp();
             int moved = 0;
             foreach (Entry entry in Entries)
             {
-                if (set.Contains(entry.Id) && entry.GroupId != target)
+                if (set.Contains(entry.Id) && !entry.IsDeleted && entry.GroupId != target)
                 {
                     entry.GroupId = target;
+                    entry.Changed = now;
                     moved++;
                 }
             }
             return moved;
+        }
+
+        private void AddTombstone(string id, string when)
+        {
+            if (Removed == null) Removed = new List<Tombstone>();
+            foreach (Tombstone existing in Removed)
+            {
+                if (existing.Id == id)
+                {
+                    existing.When = when;
+                    return;
+                }
+            }
+            var tombstone = new Tombstone();
+            tombstone.Id = id;
+            tombstone.When = when;
+            Removed.Add(tombstone);
+        }
+
+        // ---------- Настройки ----------
+
+        /// <summary>Действующие настройки: сохранённые в хранилище или значения по умолчанию.</summary>
+        public VaultSettings EffectiveSettings
+        {
+            get { return Settings != null ? Settings.Clone() : VaultSettings.Defaults(); }
+        }
+
+        /// <summary>Сохраняет настройки. Возвращает true, если они изменились.</summary>
+        public bool UpdateSettings(VaultSettings settings)
+        {
+            if (settings == null) throw new ArgumentNullException("settings");
+            VaultSettings updated = settings.Clone();
+            updated.Normalize();
+            if (updated.SameAs(EffectiveSettings)) return false;
+            updated.Changed = Timestamp();
+            Settings = updated;
+            return true;
         }
 
         /// <summary>Пути ко всем группам: идентификатор → «Работа / Проекты».</summary>
@@ -572,8 +1008,8 @@ namespace KeyBox.Vault
 
         /// <summary>
         /// Записи, подходящие под фильтр по группе и строку поиска. Фильтр по группе показывает
-        /// записи, лежащие непосредственно в ней (без подгрупп). Поиск идёт по описанию, логину
-        /// и пути к группе, так что по названию группы находятся и записи её подгрупп;
+        /// записи, лежащие непосредственно в ней (без подгрупп). Поиск идёт по описанию, логину,
+        /// адресу сайта и пути к группе, так что по названию группы находятся и записи её подгрупп;
         /// несколько слов должны найтись все. По паролям поиска нет.
         /// </summary>
         public List<Entry> Query(GroupFilter filter, string search)
@@ -592,18 +1028,18 @@ namespace KeyBox.Vault
                     {
                         groupPaths.TryGetValue(entry.GroupId, out groupPath);
                     }
-                    if (!MatchesAll(terms, entry.Description, entry.Login, groupPath)) continue;
+                    if (!MatchesAll(terms, entry.Description, entry.Login, entry.Url, groupPath)) continue;
                 }
                 result.Add(entry);
             }
             return result;
         }
 
-        private static bool MatchesAll(string[] terms, string description, string login, string groupName)
+        private static bool MatchesAll(string[] terms, string description, string login, string url, string groupName)
         {
             foreach (string term in terms)
             {
-                if (!Contains(description, term) && !Contains(login, term) && !Contains(groupName, term))
+                if (!Contains(description, term) && !Contains(login, term) && !Contains(url, term) && !Contains(groupName, term))
                 {
                     return false;
                 }
@@ -668,6 +1104,17 @@ namespace KeyBox.Vault
         /// <summary>Наименьшая версия структуры, которой достаточно для этих данных.</summary>
         private int RequiredVersion()
         {
+            // Служебные отметки времени и следы удалённого версию не повышают: прежние версии
+            // программы их просто не заметят, и данные от этого не пострадают.
+            if (Settings != null) return 3;
+            foreach (Entry entry in Entries)
+            {
+                if (entry.Url != null || entry.Totp != null || entry.IsDeleted ||
+                    (entry.History != null && entry.History.Count > 0))
+                {
+                    return 3;
+                }
+            }
             foreach (Group group in Groups)
             {
                 if (group.ParentId != null) return 2;
@@ -736,6 +1183,28 @@ namespace KeyBox.Vault
                 entry.Login = entry.Login ?? "";
                 entry.Password = entry.Password ?? "";
                 entry.Description = entry.Description ?? "";
+                entry.Url = CleanOptional(entry.Url);
+                entry.Totp = CleanOptional(entry.Totp);
+                if (string.IsNullOrEmpty(entry.Deleted)) entry.Deleted = null;
+                if (entry.History != null)
+                {
+                    entry.History.RemoveAll(delegate(PasswordRecord record) { return record == null || string.IsNullOrEmpty(record.Password); });
+                    if (entry.History.Count == 0) entry.History = null;
+                }
+            }
+
+            if (Settings != null) Settings.Normalize();
+
+            if (Removed != null)
+            {
+                // След не нужен, если такой записи или группы нет в следах дважды, и вреден, если она на самом деле есть.
+                var seen = new HashSet<string>();
+                Removed.RemoveAll(delegate(Tombstone tombstone)
+                {
+                    return tombstone == null || string.IsNullOrEmpty(tombstone.Id) ||
+                           entryIds.Contains(tombstone.Id) || groupIds.Contains(tombstone.Id) || !seen.Add(tombstone.Id);
+                });
+                if (Removed.Count == 0) Removed = null;
             }
 
             Version = RequiredVersion();
@@ -784,6 +1253,13 @@ namespace KeyBox.Vault
             return (value ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Trim();
         }
 
+        /// <summary>Необязательное поле: пустое значение хранится как null и в файл не пишется.</summary>
+        private static string CleanOptional(string value)
+        {
+            string trimmed = (value ?? "").Trim();
+            return trimmed.Length == 0 ? null : trimmed;
+        }
+
         private static string NewId()
         {
             return Guid.NewGuid().ToString("N");
@@ -806,6 +1282,19 @@ namespace KeyBox.Vault
                 return true;
             }
             local = DateTime.MinValue;
+            return false;
+        }
+
+        /// <summary>Разбирает метку времени из хранилища как время UTC. Возвращает false, если её нет.</summary>
+        public static bool TryParseUtc(string value, out DateTime utc)
+        {
+            if (!string.IsNullOrEmpty(value) &&
+                DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out utc))
+            {
+                return true;
+            }
+            utc = DateTime.MinValue;
             return false;
         }
     }
