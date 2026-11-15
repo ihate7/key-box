@@ -18,6 +18,9 @@ namespace KeyBox.UI
         private readonly bool createMode;
         private readonly TextBox txtPassword;
         private readonly TextBox txtConfirm;
+        private readonly bool needsKeyFile;
+        private readonly TextBox txtKeyFile;
+        private readonly Button btnKeyFile;
         private readonly CheckBox chkShow;
         private readonly Label lblHint;
         private readonly Label lblError;
@@ -26,11 +29,21 @@ namespace KeyBox.UI
         private VaultSession session;
         private bool busy;
 
+        /// <summary>
+        /// Путь к ключевому файлу, которым хранилище открывали в прошлый раз (или заданный
+        /// в командной строке). Помнится только пока программа запущена — на диск не пишется.
+        /// </summary>
+        internal static string LastKeyFile { get; set; }
+
         public UnlockForm(string vaultPath)
             : base(Program.AppName, 430)
         {
             this.vaultPath = vaultPath;
             createMode = !File.Exists(vaultPath);
+
+            // Нужен ли ключевой файл, записано в заголовке хранилища — его можно прочитать без пароля.
+            VaultHeader fileHeader = createMode ? null : VaultSession.Peek(vaultPath);
+            needsKeyFile = fileHeader != null && fileHeader.Kdf.KeyFile;
 
             Name = "UnlockForm";
             ShowInTaskbar = true;
@@ -137,6 +150,41 @@ namespace KeyBox.UI
                 Body.Controls.Add(warning);
             }
 
+            if (needsKeyFile)
+            {
+                Label keyLabel = Ui.MakeLabel(L.T("Ключевой файл", "Key file"));
+                keyLabel.Margin = new Padding(0, Ui.S(12), 0, 0);
+                Body.Controls.Add(keyLabel);
+
+                var keyRow = new TableLayoutPanel();
+                keyRow.AutoSize = true;
+                keyRow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                keyRow.ColumnCount = 2;
+                keyRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+                keyRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+                keyRow.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+                keyRow.Margin = new Padding(0, Ui.S(6), 0, 0);
+
+                txtKeyFile = new TextBox();
+                txtKeyFile.Name = "txtKeyFile";
+                txtKeyFile.Font = Ui.Font;
+                txtKeyFile.ReadOnly = true;
+                txtKeyFile.TabStop = false;
+                txtKeyFile.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+                txtKeyFile.Margin = Padding.Empty;
+                if (!string.IsNullOrEmpty(LastKeyFile) && File.Exists(LastKeyFile)) txtKeyFile.Text = LastKeyFile;
+
+                btnKeyFile = Ui.MakeButton(L.T("Выбрать…", "Choose…"));
+                btnKeyFile.Name = "btnKeyFile";
+                btnKeyFile.MinimumSize = new Size(0, txtKeyFile.PreferredHeight);
+                btnKeyFile.Margin = new Padding(Ui.S(6), 0, 0, 0);
+                btnKeyFile.Click += OnChooseKeyFile;
+
+                keyRow.Controls.Add(txtKeyFile, 0, 0);
+                keyRow.Controls.Add(btnKeyFile, 1, 0);
+                Body.Controls.Add(keyRow);
+            }
+
             lblError = Ui.MakeErrorLabel(ContentWidth);
             lblError.Margin = new Padding(0, Ui.S(10), 0, 0);
             Body.Controls.Add(lblError);
@@ -211,6 +259,15 @@ namespace KeyBox.UI
                 return;
             }
 
+            string keyPath = needsKeyFile ? txtKeyFile.Text : null;
+            if (needsKeyFile && keyPath.Length == 0)
+            {
+                Ui.ShowError(lblError, L.T("Это хранилище открывается паролем вместе с ключевым файлом. Укажите файл.",
+                                           "This vault is opened with the password together with a key file. Choose the file."));
+                btnKeyFile.Focus();
+                return;
+            }
+
             SetBusy(true);
             VaultSession opened = null;
             string failure = null;
@@ -221,7 +278,9 @@ namespace KeyBox.UI
                 bool create = createMode;
                 opened = await Task.Run<VaultSession>(delegate
                 {
-                    return create ? VaultSession.Create(path, password) : VaultSession.Open(path, password);
+                    if (create) return VaultSession.Create(path, password);
+                    byte[] keyFile = keyPath == null ? null : VaultSession.ReadKeyFile(keyPath);
+                    return VaultSession.Open(path, password, keyFile);
                 });
             }
             catch (VaultException ex)
@@ -266,6 +325,7 @@ namespace KeyBox.UI
             }
 
             session = opened;
+            if (keyPath != null) LastKeyFile = keyPath;
             txtPassword.Clear();
             if (txtConfirm != null) txtConfirm.Clear();
             DialogResult = DialogResult.OK;
@@ -277,6 +337,7 @@ namespace KeyBox.UI
             txtPassword.Enabled = !value;
             if (txtConfirm != null) txtConfirm.Enabled = !value;
             chkShow.Enabled = !value;
+            if (btnKeyFile != null) btnKeyFile.Enabled = !value;
             btnOk.Enabled = !value;
             btnCancel.Enabled = !value;
             UseWaitCursor = value;
@@ -289,6 +350,15 @@ namespace KeyBox.UI
             {
                 btnOk.Text = createMode ? L.T("Создать хранилище", "Create vault") : L.T("Открыть", "Open");
             }
+        }
+
+        private void OnChooseKeyFile(object sender, EventArgs e)
+        {
+            string path = Ui.PickFile(this, false, L.T("Ключевой файл", "Key file"),
+                L.T("Ключевые файлы (*.key)|*.key|Все файлы (*.*)|*.*", "Key files (*.key)|*.key|All files (*.*)|*.*"), null);
+            if (path == null) return;
+            txtKeyFile.Text = path;
+            if (!busy) Ui.ShowError(lblError, null);
         }
 
         private void OnPasswordChanged(object sender, EventArgs e)

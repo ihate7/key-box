@@ -237,8 +237,12 @@ namespace KeyBox.UI
             miAbout.Name = "miAbout";
             miAbout.Click += delegate { ShowAbout(); };
             StyleMenu(btnMore.DropDown);
+            var miProtection = new ToolStripMenuItem(L.T("Защита хранилища…", "Vault protection…"));
+            miProtection.Name = "miProtection";
+            miProtection.Click += delegate { ShowProtection(); };
             btnMore.DropDownItems.Add(miSettings);
             btnMore.DropDownItems.Add(miChangePassword);
+            btnMore.DropDownItems.Add(miProtection);
             btnMore.DropDownItems.Add(new ToolStripSeparator());
             btnMore.DropDownItems.Add(miImport);
             btnMore.DropDownItems.Add(miExport);
@@ -1843,6 +1847,17 @@ namespace KeyBox.UI
                 L.Plural(Data.LiveCount, "запись", "записи", "записей", "entry", "entries"), Ui.Shorten(Path.GetFileName(path), 60)));
         }
 
+        /// <summary>Ключевой файл и переход на Argon2id.</summary>
+        internal void ShowProtection()
+        {
+            using (var dialog = new ProtectionForm(session))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return;
+            }
+            SetDirty(false);
+            Flash(L.T("Защита хранилища изменена", "Vault protection changed"));
+        }
+
         /// <summary>Открывает окно настроек и применяет то, что в нём выбрано.</summary>
         internal void ShowSettings()
         {
@@ -1888,20 +1903,21 @@ namespace KeyBox.UI
             string text = L.F(
                 "{0} {1} — портативное хранилище паролей\n\n" +
                 "Файл хранилища:\n{2}\n\n" +
-                "Шифрование: AES-256-GCM. Ключ получается из мастер-пароля функцией PBKDF2-HMAC-SHA512 ({3} итераций).\n\n" +
+                "Шифрование: AES-256-GCM. Ключ получается из мастер-пароля функцией {3}.{8}\n\n" +
                 "В хранилище: {4}, {5}.\n\n" +
                 "{6} Буфер обмена очищается через {7} с после копирования.",
                 "{0} {1} — a portable password vault\n\n" +
                 "Vault file:\n{2}\n\n" +
-                "Encryption: AES-256-GCM. The key is derived from the master password with PBKDF2-HMAC-SHA512 ({3} iterations).\n\n" +
+                "Encryption: AES-256-GCM. The key is derived from the master password with {3}.{8}\n\n" +
                 "In the vault: {4}, {5}.\n\n" +
                 "{6} The clipboard is cleared {7} s after copying.",
                 Program.AppName, Program.Version,
                 Ui.FitPath(session.FilePath, Ui.Font, MsgBox.TextWidth),
-                session.Iterations.ToString("N0"),
+                session.Protection.Describe(),
                 L.Plural(Data.Groups.Count, "группа", "группы", "групп", "group", "groups"),
                 L.Plural(Data.LiveCount, "запись", "записи", "записей", "entry", "entries"),
-                locking, settings.ClipboardSeconds);
+                locking, settings.ClipboardSeconds,
+                session.UsesKeyFile ? L.T(" Нужен ещё и ключевой файл.", " A key file is required as well.") : "");
             MsgBox.Info(this, L.T("О программе", "About"), text);
         }
 

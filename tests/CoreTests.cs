@@ -46,11 +46,15 @@ namespace KeyBox.Tests
             Run("aes-256-gcm: NIST known answers", AesGcmKnownAnswers);
             Run("aes-256-gcm: round trip, all sizes", AesGcmRoundTrip);
             Run("aes-256-gcm: detects any modification", AesGcmDetectsTampering);
+            Run("blake2b: known answers", Blake2bKnownAnswers);
+            Run("argon2id: RFC 9106 and cross-checked answers", Argon2idKnownAnswers);
+            Run("argon2id: parameters matter, bad ones are refused", Argon2idProperties);
             Run("format: layout and round trip", FormatRoundTrip);
             Run("format: every flipped byte is rejected", FormatRejectsEveryFlippedByte);
             Run("format: truncated and foreign files are rejected", FormatRejectsTruncated);
             Run("format: header limits are enforced before the KDF runs", FormatHeaderLimits);
             Run("format: fresh nonce on every save", FormatFreshNonce);
+            Run("format 2: layout, round trip, tampering, limits", FormatVersion2);
             Run("password: unicode and NFC normalisation", PasswordNormalisation);
             Run("session: create, save, reopen", SessionCreateSaveOpen);
             Run("session: wrong password", SessionWrongPassword);
@@ -59,6 +63,8 @@ namespace KeyBox.Tests
             Run("session: change master password", SessionChangePassword);
             Run("session: no plaintext or leftovers on disk", SessionNoPlaintextOnDisk);
             Run("session: disposed session cannot save", SessionDisposed);
+            Run("session: new vaults use Argon2id", SessionArgon2);
+            Run("session: key file as a second factor", SessionKeyFile);
             Run("model: groups", ModelGroups);
             Run("model: entries", ModelEntries);
             Run("model: moving entries between groups", ModelMove);
@@ -335,7 +341,7 @@ namespace KeyBox.Tests
             ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(tooFew); });
 
             byte[] newer = (byte[])file.Clone();
-            newer[6] = 2;
+            newer[6] = 3;
             ExpectVaultError(VaultError.UnsupportedVersion, delegate { VaultFormat.ParseHeader(newer); });
 
             byte[] otherCipher = (byte[])file.Clone();
@@ -523,8 +529,11 @@ namespace KeyBox.Tests
                 session.ChangePassword(newPassword);
                 byte[] after = File.ReadAllBytes(path);
 
-                Check(session.Iterations == VaultFormat.DefaultIterations, "old vaults are upgraded to the current iteration count");
-                Check(!SameBytes(Slice(before, 14, 32), Slice(after, 14, 32)), "salt changes with the password");
+                KdfParameters protection = session.Protection;
+                Check(protection.IsArgon2 && protection.MemoryKiB == Argon2id.DefaultMemoryKiB && protection.Iterations == Argon2id.DefaultPasses &&
+                      protection.Parallelism == Argon2id.DefaultParallelism, "an old vault moves to Argon2id when its password changes");
+                Check(after[6] == 2 && after[8] == 2, "the file is written in format version 2");
+                Check(!SameBytes(Slice(before, 14, 32), Slice(after, 24, 32)), "salt changes with the password");
                 Check(session.VerifyPassword(newPassword), "session accepts the new password");
                 Check(!session.VerifyPassword(Password), "session rejects the old password");
 
@@ -1143,6 +1152,332 @@ namespace KeyBox.Tests
                 // И такие данные должны нормально сохраняться обратно.
                 Check(VaultData.FromJson(data.ToJson()).Entries.Count == data.Entries.Count, "round trip for <" + text + ">");
             }
+        }
+
+        // ---------- Argon2id ----------
+
+        private static void Blake2bKnownAnswers()
+        {
+            // RFC 7693 (приложение A) и значения, полученные независимой реализацией (OpenSSL).
+            Equal("786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce",
+                Blake2b.Hash(new byte[0], 64));
+            Equal("ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
+                Blake2b.Hash(Ascii("abc"), 64));
+            Equal("a8add4bdddfd93e4877d2746e62817b116364a1fa7bc148d95090bc7333b3673f82401cf7aa2e4cb1ecd90296e3f14cb5413f8ed77be73045b13914cdcd6a918",
+                Blake2b.Hash(Ascii("The quick brown fox jumps over the lazy dog"), 64));
+
+            // Данные длиннее одного блока (128 байт) и ровно в блок.
+            Equal("932355851d75f09c18646a9da87c25e055bc57f113121ad1ec63d45e7a1d62ab9133f8b7d1d7de9e0afa784eb6a8a11d78683013d0a672611f17668d9577d209",
+                Blake2b.Hash(Ascii(new string('a', 200)), 64));
+            Check(Blake2b.Hash(Ascii(new string('a', 128)), 64).Length == 64 && Blake2b.Hash(Ascii("abc"), 32).Length == 32, "output lengths");
+            NotEqual(Blake2b.Hash(Ascii(new string('a', 128)), 64), Blake2b.Hash(Ascii(new string('a', 129)), 64));
+            NotEqual(Slice(Blake2b.Hash(Ascii("abc"), 64), 0, 32), Blake2b.Hash(Ascii("abc"), 32));
+        }
+
+        private static void Argon2idKnownAnswers()
+        {
+            // RFC 9106, раздел 5.3: с секретным ключом и дополнительными данными.
+            Equal("0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659",
+                Argon2id.Hash(Filled(32, 1), Filled(16, 2), Filled(8, 3), Filled(12, 4), 3, 32, 4, 32));
+
+            // Значения независимой реализации (OpenSSL в Node.js): разные объёмы памяти, числа
+            // проходов и дорожек, длины результата; память, не кратная числу дорожек; наименьшая память.
+            Equal("1a98fba8e6394425c9bdc333a9c750aaf811df070f5fb4a5788e1cf4db5793a1",
+                Argon2id.Hash(Ascii("password"), Ascii("somesaltsomesalt"), 2, 64, 1, 32));
+            Equal("3c57781ce2b3a6865c42a6971f3c4a6d408d5dbfa55296279645b31e512f8ae4",
+                Argon2id.Hash(Ascii("password"), Ascii("somesaltsomesalt"), 1, 32, 4, 32));
+            Equal("825d16b5465577271efb52ecf19aea5f37e4fdafe689dbb77d25028de8316dd2665b6663c29e0f5f6c8d893738f0c53b02f2e68e92c63efaa5fee8e380e46e55",
+                Argon2id.Hash(Ascii("correct horse battery staple"), Filled(32, 7), 3, 256, 2, 64));
+            Equal("8e7d5887e56c0d763d0b871b78cc9b20",
+                Argon2id.Hash(Ascii("p"), Filled(16, 9), 2, 100, 3, 16));
+            Equal("135fbae7bef9930c74673fcaf1fa6f666f0cd91173f1553d7033bb4e9587ff4e",
+                Argon2id.Hash(new byte[0], Filled(16, 5), 1, 8, 1, 32));
+            Equal("b371df12c9a5259a478dd4f6d9d3613c58220638edb3bbcb0819675faa553f3b",
+                Argon2id.Hash(Encoding.UTF8.GetBytes("длинный пароль"), Filled(32, 0xAB), 2, 4096, 4, 32));
+        }
+
+        private static void Argon2idProperties()
+        {
+            byte[] password = Ascii("password");
+            byte[] salt = Filled(16, 1);
+            byte[] reference = Argon2id.Hash(password, salt, 2, 64, 2, 32);
+
+            Equal(reference, Argon2id.Hash(password, salt, 2, 64, 2, 32));
+            NotEqual(reference, Argon2id.Hash(Ascii("passwore"), salt, 2, 64, 2, 32));
+            NotEqual(reference, Argon2id.Hash(password, Filled(16, 2), 2, 64, 2, 32));
+            NotEqual(reference, Argon2id.Hash(password, salt, 3, 64, 2, 32));
+            NotEqual(reference, Argon2id.Hash(password, salt, 2, 128, 2, 32));
+            NotEqual(reference, Argon2id.Hash(password, salt, 2, 64, 1, 32));
+            NotEqual(reference, Slice(Argon2id.Hash(password, salt, 2, 64, 2, 64), 0, 32));
+
+            // Параллельное заполнение дорожек даёт тот же результат при каждом запуске.
+            byte[] parallel = Argon2id.Hash(password, salt, 2, 1024, 8, 32);
+            for (int i = 0; i < 5; i++)
+            {
+                Equal(parallel, Argon2id.Hash(password, salt, 2, 1024, 8, 32));
+            }
+
+            ExpectArgument(delegate { Argon2id.Hash(password, salt, 0, 64, 1, 32); });
+            ExpectArgument(delegate { Argon2id.Hash(password, salt, 1, 7, 1, 32); });
+            ExpectArgument(delegate { Argon2id.Hash(password, salt, 1, 15, 2, 32); });
+            ExpectArgument(delegate { Argon2id.Hash(password, salt, 1, 64, 0, 32); });
+            ExpectArgument(delegate { Argon2id.Hash(password, new byte[7], 1, 64, 1, 32); });
+            ExpectArgument(delegate { Argon2id.Hash(password, salt, 1, 64, 1, 3); });
+        }
+
+        private static byte[] Filled(int length, byte value)
+        {
+            var bytes = new byte[length];
+            for (int i = 0; i < length; i++) bytes[i] = value;
+            return bytes;
+        }
+
+        private static void ExpectArgument(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            throw new Exception("expected the arguments to be refused");
+        }
+
+        // ---------- Формат версии 2 и ключевой файл ----------
+
+        /// <summary>Параметры Argon2id поменьше обычных — чтобы тесты формата шли быстро.</summary>
+        private static KdfParameters SmallArgon2(byte[] salt, bool keyFile)
+        {
+            KdfParameters kdf = KdfParameters.Argon2(salt, keyFile);
+            kdf.Iterations = 1;
+            kdf.MemoryKiB = 256;
+            kdf.Parallelism = 2;
+            return kdf;
+        }
+
+        private static void FormatVersion2()
+        {
+            byte[] salt = Cng.RandomBytes(VaultFormat.SaltSize);
+            byte[] plain = Encoding.UTF8.GetBytes("{\"version\":1,\"groups\":[],\"entries\":[]}");
+            byte[] keyFileHash = VaultFormat.HashKeyFile(Ascii("the key file"));
+
+            // Раскладка заголовка.
+            KdfParameters kdf = SmallArgon2(salt, true);
+            byte[] key = VaultFormat.DeriveKey(Password, keyFileHash, kdf);
+            byte[] file = VaultFormat.Seal(key, kdf, plain);
+            Check(file.Length == 68 + plain.Length + 16, "file length");
+            Check(Encoding.ASCII.GetString(file, 0, 6) == "KEYBOX" && file[6] == 2 && file[7] == 0, "signature and format version");
+            Check(file[8] == 2 && file[9] == 1 && file[10] == 1 && file[11] == 0, "Argon2id, AES-256-GCM, key file flag, reserved byte");
+            Check(BitConverter.ToInt32(file, 12) == 1 && BitConverter.ToInt32(file, 16) == 256 && BitConverter.ToInt32(file, 20) == 2, "passes, memory, lanes");
+            Equal(salt, Slice(file, 24, 32));
+
+            VaultHeader header = VaultFormat.ParseHeader(file);
+            Check(header.FormatVersion == 2 && header.Size == 68 && header.Kdf.IsArgon2 && header.Kdf.KeyFile, "parsed header");
+            Check(header.Kdf.Iterations == 1 && header.Kdf.MemoryKiB == 256 && header.Kdf.Parallelism == 2, "parsed parameters");
+            Equal(salt, header.Salt);
+            Equal(Slice(file, 56, 12), header.Nonce);
+            Equal(plain, VaultFormat.Open(key, file));
+
+            // Любой изменённый байт — заголовка, данных или тега — обнаруживается.
+            for (int i = 0; i < file.Length; i++)
+            {
+                byte[] damaged = (byte[])file.Clone();
+                damaged[i] ^= 0x01;
+                bool rejected = false;
+                try
+                {
+                    VaultFormat.Open(key, damaged);
+                }
+                catch (VaultException)
+                {
+                    rejected = true;
+                }
+                Check(rejected, "a flipped bit in byte " + i + " is detected");
+            }
+
+            // Без ключевого файла ключ другой; с другим файлом — тоже.
+            KdfParameters withoutFile = SmallArgon2(salt, false);
+            NotEqual(key, VaultFormat.DeriveKey(Password, null, withoutFile));
+            NotEqual(key, VaultFormat.DeriveKey(Password, VaultFormat.HashKeyFile(Ascii("another file")), kdf));
+            ExpectVaultError(VaultError.KeyFileRequired, delegate { VaultFormat.DeriveKey(Password, null, kdf); });
+
+            // Секрет с ключевым файлом: HMAC-SHA512(SHA-512(файл), пароль) — сверка с независимым вычислением.
+            byte[] expectedSecret;
+            using (var hmac = new HMACSHA512(keyFileHash))
+            {
+                expectedSecret = hmac.ComputeHash(Encoding.UTF8.GetBytes(Password));
+            }
+            Equal(Argon2id.Hash(expectedSecret, salt, 1, 256, 2, 32), key);
+            Equal(Argon2id.Hash(Encoding.UTF8.GetBytes(Password), salt, 1, 256, 2, 32), VaultFormat.DeriveKey(Password, null, withoutFile));
+
+            // PBKDF2 с ключевым файлом тоже пишется в формате 2; без него — по-прежнему в формате 1.
+            KdfParameters pbkdf2 = KdfParameters.Pbkdf2(FastIterations, salt);
+            pbkdf2.KeyFile = true;
+            byte[] pbkdf2Key = VaultFormat.DeriveKey(Password, keyFileHash, pbkdf2);
+            byte[] pbkdf2File = VaultFormat.Seal(pbkdf2Key, pbkdf2, plain);
+            Check(pbkdf2File[6] == 2 && pbkdf2File[8] == 1 && pbkdf2File[10] == 1 && BitConverter.ToInt32(pbkdf2File, 12) == FastIterations &&
+                  BitConverter.ToInt32(pbkdf2File, 16) == 0 && BitConverter.ToInt32(pbkdf2File, 20) == 0, "PBKDF2 with a key file in format 2");
+            Equal(plain, VaultFormat.Open(pbkdf2Key, pbkdf2File));
+            byte[] oldStyle = VaultFormat.Seal(VaultFormat.DeriveKey(Password, salt, FastIterations), KdfParameters.Pbkdf2(FastIterations, salt), plain);
+            Check(oldStyle[6] == 1 && oldStyle.Length == 58 + plain.Length + 16, "PBKDF2 without a key file stays in format 1");
+
+            // Значения из заголовка проверяются до того, как под них выделится память.
+            byte[] hungry = (byte[])file.Clone();
+            WriteInt32(hungry, 16, VaultFormat.MaxArgon2MemoryKiB + 1);
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(hungry); });
+            byte[] endless = (byte[])file.Clone();
+            WriteInt32(endless, 12, VaultFormat.MaxArgon2Passes + 1);
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(endless); });
+            byte[] heavy = (byte[])file.Clone();
+            WriteInt32(heavy, 12, 64);
+            WriteInt32(heavy, 16, VaultFormat.MaxArgon2MemoryKiB);
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(heavy); });
+            byte[] tiny = (byte[])file.Clone();
+            WriteInt32(tiny, 16, 15);
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(tiny); });
+            byte[] noLanes = (byte[])file.Clone();
+            WriteInt32(noLanes, 20, 0);
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(noLanes); });
+            byte[] negative = (byte[])file.Clone();
+            WriteInt32(negative, 16, -1);
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(negative); });
+
+            // Незнакомые признаки и версии — «обновите программу», а не «файл повреждён».
+            byte[] unknownFlag = (byte[])file.Clone();
+            unknownFlag[10] |= 0x02;
+            ExpectVaultError(VaultError.UnsupportedVersion, delegate { VaultFormat.ParseHeader(unknownFlag); });
+            byte[] reserved = (byte[])file.Clone();
+            reserved[11] = 1;
+            ExpectVaultError(VaultError.UnsupportedVersion, delegate { VaultFormat.ParseHeader(reserved); });
+            byte[] unknownKdf = (byte[])file.Clone();
+            unknownKdf[8] = 3;
+            ExpectVaultError(VaultError.UnsupportedVersion, delegate { VaultFormat.ParseHeader(unknownKdf); });
+            byte[] future = (byte[])file.Clone();
+            future[6] = 3;
+            ExpectVaultError(VaultError.UnsupportedVersion, delegate { VaultFormat.ParseHeader(future); });
+
+            // Оборванный файл формата 2.
+            ExpectVaultError(VaultError.BadFormat, delegate { VaultFormat.ParseHeader(Slice(file, 0, 68 + 15)); });
+
+            Check(Argon2id.DefaultMemoryKiB >= 19456 && Argon2id.DefaultPasses >= 2, "default Argon2id parameters are not below the OWASP minimum");
+        }
+
+        private static void SessionArgon2()
+        {
+            string path = NewVaultPath("argon2");
+            using (VaultSession session = VaultSession.Create(path, Password))
+            {
+                KdfParameters protection = session.Protection;
+                Check(protection.IsArgon2 && protection.MemoryKiB == 64 * 1024 && protection.Iterations == 3 && protection.Parallelism == 4 && !session.UsesKeyFile,
+                    "a new vault uses Argon2id with the recommended parameters");
+                session.Data.AddEntry(null, "user", "pass", "note");
+                session.Save();
+                Check(session.VerifyPassword(Password) && !session.VerifyPassword(Password + "x"), "password check");
+            }
+
+            byte[] raw = File.ReadAllBytes(path);
+            Check(raw[6] == 2 && raw[8] == 2 && raw[10] == 0, "format version 2, Argon2id, no key file");
+            VaultHeader peeked = VaultSession.Peek(path);
+            Check(peeked != null && peeked.Kdf.IsArgon2 && !peeked.Kdf.KeyFile, "the header can be read without the password");
+            Check(VaultSession.Peek(path + ".missing") == null, "no header for a missing file");
+
+            using (VaultSession reopened = VaultSession.Open(path, Password))
+            {
+                Check(reopened.Data.Entries.Count == 1 && reopened.Data.Entries[0].Password == "pass", "data survives");
+            }
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(path, Password + "x"); });
+
+            // Хранилище прежнего формата остаётся прежним, пока его не попросят улучшить.
+            string oldPath = NewVaultPath("argon2-old");
+            using (VaultSession old = VaultSession.Create(oldPath, Password, FastIterations))
+            {
+                old.Data.AddEntry(null, "user", "pass", "note");
+                old.Save();
+                Check(!old.Protection.IsArgon2 && File.ReadAllBytes(oldPath)[6] == 1, "an old vault is still written in format 1");
+
+                // Тот же пароль, новая защита: так хранилище переводится на Argon2id.
+                old.ChangeProtection(Password, false, null);
+                Check(old.Protection.IsArgon2 && File.ReadAllBytes(oldPath)[6] == 2, "and can be moved to Argon2id on request");
+            }
+            using (VaultSession upgraded = VaultSession.Open(oldPath, Password))
+            {
+                Check(upgraded.Data.Entries.Count == 1, "the upgraded vault opens with the same password");
+            }
+        }
+
+        private static void SessionKeyFile()
+        {
+            string path = NewVaultPath("keyfile");
+            string backup = VaultSession.BackupPath(path);
+            byte[] keyFile = VaultFormat.NewKeyFile();
+            byte[] otherFile = VaultFormat.NewKeyFile();
+            Check(keyFile.Length == 64 && !SameBytes(keyFile, otherFile), "a new key file is 64 random bytes");
+
+            using (VaultSession session = VaultSession.Create(path, Password, keyFile))
+            {
+                Check(session.UsesKeyFile && session.Protection.KeyFile, "the vault needs its key file");
+                session.Data.AddEntry(null, "user", "pass", "note");
+                session.Save();
+                Check(session.VerifyPassword(Password) && !session.VerifyPassword("wrong"), "the password is checked together with the key file");
+            }
+            Check(File.ReadAllBytes(path)[10] == 1 && VaultSession.Peek(path).Kdf.KeyFile, "the header says that a key file is needed");
+
+            ExpectVaultError(VaultError.KeyFileRequired, delegate { VaultSession.Open(path, Password); });
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(path, Password, otherFile); });
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(path, Password + "x", keyFile); });
+
+            using (VaultSession session = VaultSession.Open(path, Password, keyFile))
+            {
+                Check(session.Data.Entries.Count == 1, "password and key file together open the vault");
+
+                // Смена пароля оставляет ключевой файл прежним.
+                session.ChangePassword("new password 1");
+            }
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(path, Password, keyFile); });
+            ExpectVaultError(VaultError.KeyFileRequired, delegate { VaultSession.Open(path, "new password 1"); });
+            ExpectVaultError(VaultError.KeyFileRequired, delegate { VaultSession.Open(backup, "new password 1"); });
+
+            using (VaultSession session = VaultSession.Open(path, "new password 1", keyFile))
+            {
+                // Другой ключевой файл.
+                session.ChangeProtection("new password 1", true, otherFile);
+            }
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(path, "new password 1", keyFile); });
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(backup, "new password 1", keyFile); });
+
+            using (VaultSession session = VaultSession.Open(path, "new password 1", otherFile))
+            {
+                // Отказ от ключевого файла.
+                session.ChangeProtection("new password 1", false, null);
+                Check(!session.UsesKeyFile, "the key file is no longer needed");
+            }
+            using (VaultSession session = VaultSession.Open(path, "new password 1"))
+            {
+                Check(session.Data.Entries.Count == 1 && File.ReadAllBytes(path)[10] == 0, "the vault opens with the password alone");
+            }
+            // Лишний ключевой файл при открытии не мешает.
+            VaultSession.Open(path, "new password 1", keyFile).Dispose();
+
+            // Ключевой файл добавляется к хранилищу прежнего формата.
+            string oldPath = NewVaultPath("keyfile-old");
+            using (VaultSession old = VaultSession.Create(oldPath, Password, FastIterations))
+            {
+                old.ChangeProtection(Password, true, keyFile);
+                Check(old.UsesKeyFile && old.Protection.IsArgon2, "an old vault gets a key file and Argon2id at once");
+            }
+            ExpectVaultError(VaultError.KeyFileRequired, delegate { VaultSession.Open(oldPath, Password); });
+            VaultSession.Open(oldPath, Password, keyFile).Dispose();
+
+            // Чтение ключевого файла с диска.
+            string keyPath = Path.Combine(workDir, "test.key");
+            File.WriteAllBytes(keyPath, keyFile);
+            Equal(keyFile, VaultSession.ReadKeyFile(keyPath));
+            File.WriteAllBytes(keyPath, new byte[0]);
+            ExpectVaultError(VaultError.Io, delegate { VaultSession.ReadKeyFile(keyPath); });
+            File.Delete(keyPath);
+            ExpectVaultError(VaultError.Io, delegate { VaultSession.ReadKeyFile(keyPath); });
         }
 
         // ---------- Одноразовые коды ----------
@@ -2028,6 +2363,53 @@ namespace KeyBox.Tests
                 Check(reopened.Data.Version == 2 && reopened.Data.Groups.Count == 2, "a nested vault survives encryption and reopening");
                 Check(reopened.Data.GroupPath(reopened.Data.Entries[0].GroupId) == "Работа / Проекты", "group path after reopening");
             }
+
+            // 3. Формат версии 2 (Argon2id, ключевой файл), записанный Node.js.
+            string nodeFile2 = Path.Combine(workDir, "node2.vault");
+            string nodeKey2 = Path.Combine(workDir, "node2.key");
+            if (File.Exists(nodeFile2) && File.Exists(nodeKey2))
+            {
+                byte[] nodeKeyFile = VaultSession.ReadKeyFile(nodeKey2);
+                using (VaultSession session = VaultSession.Open(nodeFile2, InteropPassword, nodeKeyFile))
+                {
+                    VaultData data = session.Data;
+                    Check(session.Protection.IsArgon2 && session.UsesKeyFile, "node file 2: Argon2id with a key file");
+                    Check(data.Version == 3 && data.Entries.Count == 2 && data.LiveCount == 1 && data.TrashCount == 1, "node file 2: entries and the trash");
+                    Entry entry = data.Query(GroupFilter.All, null)[0];
+                    Check(entry.Password == InteropSecret && entry.Url == "https://example.com/login" && entry.Totp == "JBSWY3DPEHPK3PXP", "node file 2: fields");
+                    Check(entry.History != null && entry.History.Count == 1 && entry.History[0].Password == "old-one", "node file 2: password history");
+                }
+                ExpectVaultError(VaultError.KeyFileRequired, delegate { VaultSession.Open(nodeFile2, InteropPassword); });
+                ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(nodeFile2, InteropPassword, VaultFormat.NewKeyFile()); });
+                Console.WriteLine("      node2.vault (Argon2id, key file) written by Node.js opens here");
+            }
+            else
+            {
+                Console.WriteLine("      node2.vault not found - the version 2 format is not cross-checked (needs Node.js with crypto.argon2Sync)");
+            }
+
+            // 4. Такой же файл для проверки в Node.js.
+            string csFile2 = Path.Combine(workDir, "cs2.vault");
+            string csKey2 = Path.Combine(workDir, "cs2.key");
+            AtomicFile.TryDelete(csFile2);
+            AtomicFile.TryDelete(VaultSession.BackupPath(csFile2));
+            byte[] csKeyFile = VaultFormat.NewKeyFile();
+            File.WriteAllBytes(csKey2, csKeyFile);
+            using (VaultSession session = VaultSession.Create(csFile2, InteropPassword, csKeyFile))
+            {
+                var fields = new EntryFields();
+                fields.Login = "user@example.com";
+                fields.Password = "old-one";
+                fields.Description = "Строка 1\nСтрока 2";
+                fields.Url = "https://example.com/login";
+                fields.Totp = "JBSWY3DPEHPK3PXP";
+                Entry entry = session.Data.AddEntry(fields);
+                fields.Password = InteropSecret;
+                session.Data.UpdateEntry(entry.Id, fields);
+                Entry gone = session.Data.AddEntry(null, "gone", "x", "deleted entry");
+                session.Data.TrashEntries(new[] { gone.Id });
+                session.Save();
+            }
         }
 
         private static void KdfTiming()
@@ -2040,6 +2422,14 @@ namespace KeyBox.Tests
             watch.Stop();
             Console.WriteLine("      PBKDF2-HMAC-SHA512, {0} iterations: {1} ms", VaultFormat.DefaultIterations, watch.ElapsedMilliseconds);
             Check(watch.ElapsedMilliseconds < 10000, "unlock time is acceptable");
+
+            KdfParameters argon = KdfParameters.Argon2(salt, false);
+            watch = Stopwatch.StartNew();
+            VaultFormat.DeriveKey(Password, null, argon);
+            watch.Stop();
+            Console.WriteLine("      Argon2id, {0} MiB, {1} passes, {2} threads ({3}-bit process, {4} processors): {5} ms",
+                argon.MemoryKiB / 1024, argon.Iterations, argon.Parallelism, IntPtr.Size * 8, Environment.ProcessorCount, watch.ElapsedMilliseconds);
+            Check(watch.ElapsedMilliseconds < 20000, "unlock time with Argon2id is acceptable");
         }
 
         // ---------- Инфраструктура ----------

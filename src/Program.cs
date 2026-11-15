@@ -25,6 +25,9 @@ namespace KeyBox
             Application.ThreadException += OnThreadException;
             AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
 
+            // «--key путь» задаёт ключевой файл — чтобы его не приходилось выбирать при каждом запуске.
+            args = TakeKeyFileOption(args);
+
             string vaultPath;
             try
             {
@@ -54,6 +57,26 @@ namespace KeyBox
                     ClipboardGuard.ClearIfOwned();
                 }
             }
+        }
+
+        /// <summary>Вынимает из аргументов «--key путь» и запоминает путь; возвращает остальные аргументы.</summary>
+        internal static string[] TakeKeyFileOption(string[] args)
+        {
+            if (args == null) return new string[0];
+            var rest = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (string.Equals(args[i], "--key", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    UnlockForm.LastKeyFile = args[i + 1];
+                    i++;
+                }
+                else
+                {
+                    rest.Add(args[i]);
+                }
+            }
+            return rest.ToArray();
         }
 
         /// <summary>

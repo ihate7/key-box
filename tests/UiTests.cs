@@ -146,6 +146,7 @@ namespace KeyBox.Tests
             Run("lock closes the window", Lock);
             Run("unlock: wrong password, then the right one", Unlock);
             Run("change the master password", ChangeMasterPassword);
+            Run("vault protection: key file as a second key", Protection);
             Run("auto-lock also closes open dialogs", AutoLock);
             Run("english interface: every window, nothing left untranslated", EnglishInterface);
 
@@ -1739,6 +1740,168 @@ namespace KeyBox.Tests
             Pump(40);
         }
 
+        /// <summary>
+        /// Защита хранилища: ключевой файл создаётся, хранилище начинает его требовать, вход идёт
+        /// с файлом; затем от файла отказываются. В конце хранилище снова открывается одним паролем.
+        /// </summary>
+        private static void Protection()
+        {
+            string keyPath = Path.Combine(workDir, "test-vault.key");
+            string wrongPath = Path.Combine(workDir, "wrong.key");
+            string oldPath = Path.Combine(workDir, "old-format.vault");
+            foreach (string file in new[] { keyPath, wrongPath, oldPath, oldPath + ".bak" })
+            {
+                if (File.Exists(file)) File.Delete(file);
+            }
+
+            string picked = keyPath;
+            Ui.FilePicker = delegate(bool save, string suggested) { return picked; };
+            UnlockForm.LastKeyFile = null;
+            try
+            {
+                // --- Создание ключевого файла.
+                Drive<ProtectionForm>(delegate { ClickTool("toolbar", "miProtection"); }, delegate(ProtectionForm f)
+                {
+                    Label status = Find<Label>(f, "lblStatus");
+                    Label error = Find<Label>(f, "lblError");
+                    TextBox password = Find<TextBox>(f, "txtPassword");
+
+                    Check(status.Text.Contains("Argon2id") && status.Text.Contains("Ключевой файл не используется"), "current protection is described: " + status.Text);
+                    Check(Find<RadioButton>(f, "rbNone").Checked && !Find<RadioButton>(f, "rbKeep").Visible, "the password alone is selected, there is no file to keep");
+                    Check(!Find<Button>(f, "btnBrowse").Enabled, "no path is needed for the password alone");
+
+                    Click(f, "btnOk");
+                    Check(error.Visible && error.Text.Contains("Введите"), "the password is required: " + error.Text);
+
+                    Find<RadioButton>(f, "rbNew").Checked = true;
+                    password.Text = NewMasterPassword;
+                    Click(f, "btnOk");
+                    Check(error.Visible && error.Text.Contains("куда сохранить"), "a place for the new file is required: " + error.Text);
+
+                    Click(f, "btnBrowse");
+                    Check(Find<TextBox>(f, "txtFile").Text == keyPath && !error.Visible, "the chosen path is shown");
+
+                    password.Text = "не тот пароль";
+                    Click(f, "btnOk");
+                    WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
+                    Check(f.Visible && error.Visible && error.Text.Contains("неверно") && !File.Exists(keyPath), "a wrong password changes nothing: " + error.Text);
+                    Shot(f, "35-protection");
+
+                    password.Text = NewMasterPassword;
+                    Click(f, "btnOk");
+                    WaitDecided(f, 30000, "the vault to be re-encrypted");
+                });
+
+                Check(File.Exists(keyPath) && new FileInfo(keyPath).Length == 64, "the key file is created");
+                Check(session.UsesKeyFile && StatusText("lblMessage").Contains("Защита хранилища изменена"), "status: " + StatusText("lblMessage"));
+                Check(VaultSession.Peek(vaultPath).Kdf.KeyFile, "the vault file now asks for a key file");
+                bool refused = false;
+                try
+                {
+                    VaultSession.Open(vaultPath, NewMasterPassword).Dispose();
+                }
+                catch (VaultException ex)
+                {
+                    refused = ex.Error == VaultError.KeyFileRequired;
+                }
+                Check(refused, "the password alone no longer opens the vault");
+                using (VaultSession copy = VaultSession.Open(vaultPath, NewMasterPassword, File.ReadAllBytes(keyPath)))
+                {
+                    Check(copy.Data.Entries.Count == session.Data.Entries.Count, "password and key file together do");
+                }
+
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miAbout"); }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("ключевой файл"), "the about box mentions the key file");
+                    Click(box, "btnOk");
+                });
+
+                // --- Вход: окно спрашивает ключевой файл.
+                MainForm window = main;
+                ClickTool("toolbar", "btnLock");
+                WaitUntil(delegate { return window.IsDisposed; }, 5000, "the window to close");
+                session.Dispose();
+                session = null;
+                main = null;
+                UnlockForm.LastKeyFile = null;
+
+                using (var form = new UnlockForm(vaultPath))
+                {
+                    Drive<UnlockForm>(delegate { form.ShowDialog(); }, delegate(UnlockForm f)
+                    {
+                        TextBox file = Find<TextBox>(f, "txtKeyFile");
+                        Label error = Find<Label>(f, "lblError");
+                        Check(file.Text == "" && file.ReadOnly, "the key file field is shown and empty");
+
+                        Find<TextBox>(f, "txtPassword").Text = NewMasterPassword;
+                        Click(f, "btnOk");
+                        Check(error.Visible && error.Text.Contains("ключевым файлом"), "the key file is asked for: " + error.Text);
+
+                        // Не тот файл.
+                        File.WriteAllBytes(wrongPath, new byte[64]);
+                        picked = wrongPath;
+                        Click(f, "btnKeyFile");
+                        Check(file.Text == wrongPath && !error.Visible, "the chosen file is shown, the error is cleared");
+                        Click(f, "btnOk");
+                        WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
+                        Check(f.Visible && error.Visible && error.Text.Contains("ключевой файл"), "a wrong key file is rejected: " + error.Text);
+                        Shot(f, "36-unlock-key-file");
+
+                        picked = keyPath;
+                        Click(f, "btnKeyFile");
+                        Click(f, "btnOk");
+                        WaitDecided(f, 20000, "the vault to open");
+                    });
+                    session = form.TakeSession();
+                }
+                Check(session != null && session.UsesKeyFile && UnlockForm.LastKeyFile == keyPath, "opened with the password and the key file");
+
+                // Пока программа работает, путь к файлу помнится.
+                using (var form = new UnlockForm(vaultPath))
+                {
+                    Drive<UnlockForm>(delegate { form.ShowDialog(); }, delegate(UnlockForm f)
+                    {
+                        Check(Find<TextBox>(f, "txtKeyFile").Text == keyPath, "the key file is remembered until the program exits");
+                        Click(f, "btnCancel");
+                    });
+                }
+
+                // --- Отказ от ключевого файла.
+                OpenMain();
+                Drive<ProtectionForm>(delegate { ClickTool("toolbar", "miProtection"); }, delegate(ProtectionForm f)
+                {
+                    Check(Find<RadioButton>(f, "rbKeep").Visible && Find<RadioButton>(f, "rbKeep").Checked, "keeping the current file is offered and selected");
+                    Check(Find<Label>(f, "lblStatus").Text.Contains("вместе с ключевым файлом"), "status: " + Find<Label>(f, "lblStatus").Text);
+                    Find<RadioButton>(f, "rbNone").Checked = true;
+                    Find<TextBox>(f, "txtPassword").Text = NewMasterPassword;
+                    Click(f, "btnOk");
+                    WaitDecided(f, 30000, "the vault to be re-encrypted");
+                });
+                Check(!session.UsesKeyFile && !VaultSession.Peek(vaultPath).Kdf.KeyFile, "the key file is no longer needed");
+                VaultSession.Open(vaultPath, NewMasterPassword).Dispose();
+
+                // --- Хранилище прежнего формата: окно объясняет, что оно перейдёт на Argon2id.
+                using (VaultSession old = VaultSession.Create(oldPath, "old password 1", VaultFormat.MinIterations))
+                using (var f = new ProtectionForm(old))
+                {
+                    f.Show();
+                    Pump(60);
+                    string text = Find<Label>(f, "lblStatus").Text;
+                    Check(text.Contains("PBKDF2-HMAC-SHA512") && text.Contains("перейдёт на Argon2id"), "an old vault is offered Argon2id: " + text);
+                    f.Close();
+                }
+            }
+            finally
+            {
+                Ui.FilePicker = null;
+                UnlockForm.LastKeyFile = null;
+                foreach (string file in new[] { keyPath, wrongPath, oldPath, oldPath + ".bak" })
+                {
+                    if (File.Exists(file)) File.Delete(file);
+                }
+            }
+        }
+
         private static List<Label> AllLabels(Control root)
         {
             var labels = new List<Label>();
@@ -2093,7 +2256,7 @@ namespace KeyBox.Tests
             Drive<MsgBox>(delegate { ClickTool("toolbar", "miAbout"); }, delegate(MsgBox box)
             {
                 string text = Find<Label>(box, "lblText").Text;
-                Check(text.Contains("AES-256-GCM") && text.Contains("PBKDF2-HMAC-SHA512") && text.Contains("600"), "encryption is described: " + text);
+                Check(text.Contains("AES-256-GCM") && text.Contains("Argon2id") && text.Contains("64 МиБ"), "encryption is described: " + text);
                 Check(text.Contains("2 группы") && text.Contains("7 записей"), "vault contents are counted: " + text);
                 Check(text.Contains(Path.GetFileName(vaultPath)), "the vault file is named");
                 Check(box.Width <= Ui.S(560), "the box keeps a sane width: " + box.Width);
@@ -2488,6 +2651,16 @@ namespace KeyBox.Tests
                     CheckEnglish(f);
                     Find<CheckBox>(f, "chkLower").Checked = true;
                     Shot(f, "en-05-settings");
+                    Click(f, "btnCancel");
+                });
+
+                Drive<ProtectionForm>(delegate { ClickTool("toolbar", "miProtection"); }, delegate(ProtectionForm f)
+                {
+                    Check(Find<Label>(f, "lblStatus").Text.Contains("Argon2id (64 MiB of memory"), "protection is described: " + Find<Label>(f, "lblStatus").Text);
+                    Click(f, "btnOk");
+                    Check(Find<Label>(f, "lblError").Text == "Enter the master password.", "validation message: " + Find<Label>(f, "lblError").Text);
+                    CheckEnglish(f);
+                    Shot(f, "en-06-protection");
                     Click(f, "btnCancel");
                 });
 
