@@ -16,6 +16,7 @@ namespace KeyBox.UI
     {
         private readonly string vaultPath;
         private readonly bool createMode;
+        private readonly bool another;
         private readonly TextBox txtPassword;
         private readonly TextBox txtConfirm;
         private readonly bool needsKeyFile;
@@ -36,20 +37,34 @@ namespace KeyBox.UI
         internal static string LastKeyFile { get; set; }
 
         public UnlockForm(string vaultPath)
+            : this(vaultPath, false)
+        {
+        }
+
+        /// <param name="another">
+        /// true — открывается не основное хранилище, а другой файл, с которым его объединяют:
+        /// окно показывается поверх главного, нового хранилища не создаёт и не трогает
+        /// запомненный путь к ключевому файлу.
+        /// </param>
+        public UnlockForm(string vaultPath, bool another)
             : base(Program.AppName, 430)
         {
             this.vaultPath = vaultPath;
-            createMode = !File.Exists(vaultPath);
+            this.another = another;
+            createMode = !another && !File.Exists(vaultPath);
 
             // Нужен ли ключевой файл, записано в заголовке хранилища — его можно прочитать без пароля.
             VaultHeader fileHeader = createMode ? null : VaultSession.Peek(vaultPath);
             needsKeyFile = fileHeader != null && fileHeader.Kdf.KeyFile;
 
             Name = "UnlockForm";
-            ShowInTaskbar = true;
-            ShowIcon = true;
-            MinimizeBox = true;
-            StartPosition = FormStartPosition.CenterScreen;
+            if (!another)
+            {
+                ShowInTaskbar = true;
+                ShowIcon = true;
+                MinimizeBox = true;
+                StartPosition = FormStartPosition.CenterScreen;
+            }
 
             Body.ColumnCount = 1;
             Body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -79,7 +94,10 @@ namespace KeyBox.UI
 
             Label title = Ui.MakeLabel(Program.AppName);
             title.Font = Ui.TitleFont;
-            Label subtitle = Ui.MakeLabel(createMode ? L.T("Создание нового хранилища паролей", "Create a new password vault") : L.T("Хранилище заблокировано", "The vault is locked"));
+            Label subtitle = Ui.MakeLabel(
+                another ? L.T("Другой файл хранилища: нужен его пароль", "Another vault file: its password is needed")
+                : createMode ? L.T("Создание нового хранилища паролей", "Create a new password vault")
+                : L.T("Хранилище заблокировано", "The vault is locked"));
             subtitle.Name = "lblSubtitle";
             subtitle.ForeColor = Ui.Muted;
             subtitle.Margin = new Padding(Ui.S(2), 0, 0, 0);
@@ -172,7 +190,7 @@ namespace KeyBox.UI
                 txtKeyFile.TabStop = false;
                 txtKeyFile.Anchor = AnchorStyles.Left | AnchorStyles.Right;
                 txtKeyFile.Margin = Padding.Empty;
-                if (!string.IsNullOrEmpty(LastKeyFile) && File.Exists(LastKeyFile)) txtKeyFile.Text = LastKeyFile;
+                if (!another && !string.IsNullOrEmpty(LastKeyFile) && File.Exists(LastKeyFile)) txtKeyFile.Text = LastKeyFile;
 
                 btnKeyFile = Ui.MakeButton(L.T("Выбрать…", "Choose…"));
                 btnKeyFile.Name = "btnKeyFile";
@@ -209,7 +227,7 @@ namespace KeyBox.UI
             btnOk = Ui.MakeButton(createMode ? L.T("Создать хранилище", "Create vault") : L.T("Открыть", "Open"));
             btnOk.Name = "btnOk";
             btnOk.Click += OnOk;
-            btnCancel = Ui.MakeButton(L.T("Выход", "Exit"));
+            btnCancel = Ui.MakeButton(another ? L.T("Отмена", "Cancel") : L.T("Выход", "Exit"));
             btnCancel.Name = "btnCancel";
             btnCancel.DialogResult = DialogResult.Cancel;
             SetButtons(btnOk, btnCancel, false);
@@ -287,7 +305,7 @@ namespace KeyBox.UI
             {
                 failure = ex.Message;
                 string backup = VaultSession.BackupPath(vaultPath);
-                if (ex.Error == VaultError.BadFormat && File.Exists(backup))
+                if (!another && ex.Error == VaultError.BadFormat && File.Exists(backup))
                 {
                     // Файл испорчен, но рядом лежит предыдущая сохранённая версия.
                     failure += L.F(" Рядом есть резервная копия: чтобы открыть её, переименуйте «{0}» в «{1}».",
@@ -325,7 +343,7 @@ namespace KeyBox.UI
             }
 
             session = opened;
-            if (keyPath != null) LastKeyFile = keyPath;
+            if (keyPath != null && !another) LastKeyFile = keyPath;
             txtPassword.Clear();
             if (txtConfirm != null) txtConfirm.Clear();
             DialogResult = DialogResult.OK;

@@ -26,6 +26,12 @@ namespace KeyBox.UI
         /// <summary>Через сколько секунд скопированный логин или пароль стирается из буфера обмена.</summary>
         public const int ClipboardClearSeconds = 30;
 
+        /// <summary>Раз в сколько секунд программа смотрит, не изменился ли файл хранилища в другом месте.</summary>
+        public const int DefaultFileCheckSeconds = 3;
+
+        /// <summary>Сколько секунд в строке состояния держится итог объединения с изменённым файлом.</summary>
+        private const int MergeNoteSeconds = 10;
+
         /// <summary>Файл для импорта крупнее этого размера явно не список паролей.</summary>
         private const int MaxImportFileSize = 32 * 1024 * 1024;
 
@@ -104,6 +110,9 @@ namespace KeyBox.UI
         private bool hadSearch;
         private string flashText = "";
         private int flashSeconds;
+        private string mergeNote;
+        private int sinceFileCheck;
+        private bool exiting;
 
         public MainForm(VaultSession session)
         {
@@ -111,6 +120,7 @@ namespace KeyBox.UI
             this.session = session;
             settings = session.Data.EffectiveSettings;
             AutoLockSeconds = settings.AutoLockMinutes * 60;
+            FileCheckSeconds = DefaultFileCheckSeconds;
 
             Name = "MainForm";
             Text = Program.AppName;
@@ -167,6 +177,12 @@ namespace KeyBox.UI
 
         /// <summary>Порог автоблокировки в секундах (отдельным свойством — чтобы его могли менять тесты).</summary>
         internal int AutoLockSeconds { get; set; }
+
+        /// <summary>
+        /// Раз в сколько секунд проверять, не изменился ли файл хранилища в другом месте;
+        /// 0 — не проверять (тесты вызывают проверку сами, по шагам).
+        /// </summary>
+        internal int FileCheckSeconds { get; set; }
 
         private VaultData Data
         {
@@ -230,6 +246,9 @@ namespace KeyBox.UI
             var miExport = new ToolStripMenuItem(L.T("Экспорт в файл…", "Export to a file…"));
             miExport.Name = "miExport";
             miExport.Click += delegate { ExportEntries(); };
+            var miMerge = new ToolStripMenuItem(L.T("Объединить с файлом…", "Merge with a file…"));
+            miMerge.Name = "miMerge";
+            miMerge.Click += delegate { MergeWithFile(); };
             var miChangePassword = new ToolStripMenuItem(L.T("Сменить мастер-пароль…", "Change master password…"));
             miChangePassword.Name = "miChangePassword";
             miChangePassword.Click += delegate { ChangeMasterPassword(); };
@@ -246,6 +265,7 @@ namespace KeyBox.UI
             btnMore.DropDownItems.Add(new ToolStripSeparator());
             btnMore.DropDownItems.Add(miImport);
             btnMore.DropDownItems.Add(miExport);
+            btnMore.DropDownItems.Add(miMerge);
             btnMore.DropDownItems.Add(new ToolStripSeparator());
             btnMore.DropDownItems.Add(miAbout);
 
@@ -961,8 +981,13 @@ namespace KeyBox.UI
 
         private void Flash(string text)
         {
+            Flash(text, 5);
+        }
+
+        private void Flash(string text, int seconds)
+        {
             flashText = text;
-            flashSeconds = 5;
+            flashSeconds = seconds;
             UpdateStatus();
         }
 
@@ -1012,6 +1037,18 @@ namespace KeyBox.UI
                 flashSeconds--;
                 if (flashSeconds == 0) UpdateStatus();
             }
+            if (mergeNote != null)
+            {
+                // Итог объединения показывается на секунду позже сообщения о самом действии.
+                string note = mergeNote;
+                mergeNote = null;
+                Flash(note, MergeNoteSeconds);
+            }
+            if (FileCheckSeconds > 0 && ++sinceFileCheck >= FileCheckSeconds)
+            {
+                sinceFileCheck = 0;
+                CheckFile();
+            }
             if (settings.AutoLockMinutes > 0 && idle.IdleSeconds >= AutoLockSeconds)
             {
                 RequestLock(false);
@@ -1025,6 +1062,7 @@ namespace KeyBox.UI
         /// <summary>
         /// Записывает хранилище в файл. При неудаче предлагает повторить; пока запись
         /// не удалась, изменения остаются в памяти, а в строке состояния висит предупреждение.
+        /// Если файл за это время изменили в другом месте, его изменения вливаются в открытые данные.
         /// </summary>
         private bool SaveVault()
         {
@@ -1035,13 +1073,23 @@ namespace KeyBox.UI
                 {
                     session.Save();
                     SetDirty(false);
+                    ShowMerged(true);
                     return true;
                 }
-                catch (VaultException ex) { problem = ex.Message; }
+                catch (VaultException ex)
+                {
+                    problem = ex.Message;
+                    if (ex.Error == VaultError.Conflict)
+                    {
+                        problem = ResolveConflict(ex.Message, true, false);
+                        if (problem == null) return true;
+                    }
+                }
                 catch (System.Security.Cryptography.CryptographicException ex) { problem = ex.Message; }
                 catch (ObjectDisposedException) { return false; }
 
                 SetDirty(true);
+                ShowMerged(true); // открытые данные могли пополниться из файла и при неудачной записи
                 bool retry = MsgBox.Retry(this, L.T("Не удалось сохранить", "Could not save"),
                     problem + L.T("\n\nИзменения пока остаются только в памяти программы. " +
                                   "Проверьте, что носитель на месте и доступен для записи, и повторите попытку.",
@@ -1060,9 +1108,125 @@ namespace KeyBox.UI
                 SetDirty(false);
                 return true;
             }
-            catch (VaultException) { return false; }
+            catch (VaultException ex)
+            {
+                return ex.Error == VaultError.Conflict && ResolveConflict(ex.Message, true, true) == null;
+            }
             catch (System.Security.Cryptography.CryptographicException) { return false; }
             catch (ObjectDisposedException) { return false; }
+        }
+
+        /// <summary>
+        /// Смотрит, не изменил ли файл хранилища кто-то ещё — тот же файл может быть открыт на другом
+        /// компьютере через общую или облачную папку, — и вливает найденные изменения.
+        /// </summary>
+        internal void CheckFile()
+        {
+            // Пока открыт диалог или нажата кнопка мыши (идёт перетаскивание), список под руками не меняется.
+            if (closing || LockRequested || ReopenRequested || OwnedForms.Length > 0 || MouseButtons != MouseButtons.None) return;
+
+            try
+            {
+                if (!session.Reload()) return;
+            }
+            catch (VaultException ex)
+            {
+                if (ex.Error == VaultError.Conflict) ResolveConflict(ex.Message, dirty || session.HasUnwrittenChanges, false);
+                return;
+            }
+            catch (System.Security.Cryptography.CryptographicException) { return; }
+            catch (ObjectDisposedException) { return; }
+
+            ShowMerged(false);
+            if (session.HasUnwrittenChanges) SetDirty(true);
+        }
+
+        /// <summary>
+        /// Показывает то, что влилось из файла при сохранении или проверке: список обновляется,
+        /// настройки применяются, в строке состояния появляется итог.
+        /// </summary>
+        /// <param name="later">true — итог показать чуть позже, чтобы его не затёрло сообщение о самом действии.</param>
+        private void ShowMerged(bool later)
+        {
+            MergeResult merged = session.TakeMerge();
+            if (merged == null || !merged.Changed) return;
+
+            if (merged.SettingsUpdated) ApplyVaultSettings();
+            RefreshAll();
+
+            string note = L.F("Файл изменён в другом месте — подхвачено: {0}", "The file was changed elsewhere — picked up: {0}", merged.Describe());
+            if (later)
+            {
+                mergeNote = note;
+            }
+            else
+            {
+                Flash(note, MergeNoteSeconds);
+            }
+        }
+
+        /// <summary>Применяет настройки, записанные в хранилище. Язык окна меняется при следующем его открытии.</summary>
+        private void ApplyVaultSettings()
+        {
+            settings = Data.EffectiveSettings;
+            AutoLockSeconds = settings.AutoLockMinutes * 60;
+        }
+
+        /// <summary>
+        /// Файл хранилища в другом месте перешифровали (сменили мастер-пароль или защиту) либо записали
+        /// более новой версией программы: нынешним ключом его не прочитать, а затирать нельзя.
+        /// Несохранённое уходит в отдельный файл рядом, после чего хранилище блокируется —
+        /// открыть его заново можно уже новым паролем.
+        /// </summary>
+        /// <param name="unsaved">Есть ли в памяти то, чего нет в файле.</param>
+        /// <param name="quiet">true — без сообщения (автоблокировка).</param>
+        /// <returns>null или текст ошибки, если отдельный файл записать не удалось.</returns>
+        private string ResolveConflict(string reason, bool unsaved, bool quiet)
+        {
+            string copy = null;
+            if (unsaved)
+            {
+                string failure = null;
+                try
+                {
+                    copy = session.SaveConflictCopy(null);
+                }
+                catch (VaultException ex) { failure = ex.Message; }
+                catch (System.Security.Cryptography.CryptographicException ex) { failure = ex.Message; }
+                catch (ObjectDisposedException) { return null; }
+
+                if (failure != null)
+                {
+                    return reason + L.T("\n\nСохранить последние изменения в отдельный файл тоже не удалось. ",
+                                        "\n\nSaving the latest changes to a separate file failed as well. ") + failure;
+                }
+                SetDirty(false);
+            }
+
+            // При выходе из программы блокировать уже нечего; окно, которое ещё не показано, закроется позже.
+            bool lockNow = !exiting && !closing && IsHandleCreated;
+            if (!quiet)
+            {
+                string text = reason;
+                if (copy != null)
+                {
+                    text += "\n\n" + L.F(
+                        "Ваши последние изменения сохранены рядом, в отдельном файле «{0}»: он открывается прежним паролем. " +
+                        "Вернуть их в хранилище можно командой «Ещё → Объединить с файлом…».",
+                        "Your latest changes have been saved next to it, in a separate file “{0}”, which opens with the previous password. " +
+                        "Bring them back into the vault with “More → Merge with a file…”.",
+                        Path.GetFileName(copy));
+                }
+                if (lockNow)
+                {
+                    text += "\n\n" + L.T("Хранилище сейчас заблокируется. Чтобы продолжить, откройте его заново.",
+                                         "The vault will be locked now. Open it again to continue.");
+                }
+                MsgBox.Error(this, L.T("Хранилище изменено в другом месте", "The vault was changed elsewhere"), text);
+            }
+
+            if (lockNow) CloseForLock();
+            return null;
         }
 
         private void SetDirty(bool value)
@@ -1663,6 +1827,12 @@ namespace KeyBox.UI
                 }
             }
 
+            CloseForLock();
+        }
+
+        private void CloseForLock()
+        {
+            if (LockRequested) return;
             LockRequested = true;
             CloseOwnedForms(this);
             if (IsHandleCreated)
@@ -1702,6 +1872,7 @@ namespace KeyBox.UI
                 if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return;
             }
             SetDirty(false);
+            ShowMerged(true);
             Flash(L.T("Мастер-пароль изменён", "Master password changed"));
         }
 
@@ -1847,6 +2018,85 @@ namespace KeyBox.UI
                 L.Plural(Data.LiveCount, "запись", "записи", "записей", "entry", "entries"), Ui.Shorten(Path.GetFileName(path), 60)));
         }
 
+        /// <summary>
+        /// Вливает в открытое хранилище содержимое другого файла хранилища: копии с другого
+        /// компьютера или флешки, «конфликтующей копии» из облачной папки, файла, отложенного
+        /// при конфликте. Одни и те же записи не удваиваются: из двух версий берётся более поздняя.
+        /// </summary>
+        internal void MergeWithFile()
+        {
+            string title = L.T("Объединение", "Merge");
+            string path = Ui.PickFile(this, false, L.T("Объединить с файлом хранилища", "Merge with a vault file"),
+                L.T("Хранилища KeyBox (*.vault)|*.vault|Все файлы (*.*)|*.*", "KeyBox vaults (*.vault)|*.vault|All files (*.*)|*.*"), null);
+            if (path == null || LockRequested) return;
+
+            if (SameFile(path, session.FilePath))
+            {
+                MsgBox.Info(this, title, L.T("Это тот самый файл, который сейчас открыт. Выберите другую копию хранилища.",
+                                             "This is the very file that is open now. Choose another copy of the vault."));
+                return;
+            }
+
+            MergeResult result;
+            try
+            {
+                // Копия этого же хранилища открывается тем же ключом — пароль спрашивать незачем.
+                VaultData other = session.ReadCopy(path);
+                if (other != null)
+                {
+                    result = Data.Merge(other);
+                }
+                else
+                {
+                    using (var unlock = new UnlockForm(path, true))
+                    {
+                        if (unlock.ShowDialog(this) != DialogResult.OK || LockRequested) return;
+                        using (VaultSession copy = unlock.TakeSession())
+                        {
+                            if (copy == null) return;
+                            result = Data.Merge(copy.Data);
+                        }
+                    }
+                }
+            }
+            catch (VaultException ex)
+            {
+                MsgBox.Error(this, title, ex.Message);
+                return;
+            }
+            catch (System.Security.Cryptography.CryptographicException ex)
+            {
+                MsgBox.Error(this, title, ex.Message);
+                return;
+            }
+
+            if (result.SettingsUpdated) ApplyVaultSettings();
+            SaveVault();
+            RefreshAll();
+
+            string name = Ui.Shorten(Path.GetFileName(path), 60);
+            if (!result.Changed)
+            {
+                MsgBox.Info(this, title, L.F("В файле «{0}» нет ничего нового: всё, что в нём есть, уже есть в открытом хранилище.",
+                                             "The file “{0}” has nothing new: everything in it is already in the open vault.", name));
+                return;
+            }
+            Flash(L.F("Объединено с файлом «{0}»: {1}", "Merged with the file “{0}”: {1}", name, result.Describe()), MergeNoteSeconds);
+            MsgBox.Info(this, title, L.F("Объединено с файлом «{0}»: {1}.", "Merged with the file “{0}”: {1}.", name, result.Describe()));
+        }
+
+        private static bool SameFile(string first, string second)
+        {
+            try
+            {
+                return string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), StringComparison.OrdinalIgnoreCase);
+            }
+            catch (ArgumentException) { return false; }
+            catch (NotSupportedException) { return false; }
+            catch (IOException) { return false; }
+            catch (System.Security.SecurityException) { return false; }
+        }
+
         /// <summary>Ключевой файл и переход на Argon2id.</summary>
         internal void ShowProtection()
         {
@@ -1855,6 +2105,7 @@ namespace KeyBox.UI
                 if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return;
             }
             SetDirty(false);
+            ShowMerged(true);
             Flash(L.T("Защита хранилища изменена", "Vault protection changed"));
         }
 
@@ -1870,8 +2121,7 @@ namespace KeyBox.UI
             if (!Data.UpdateSettings(updated)) return;
 
             SaveVault();
-            settings = Data.EffectiveSettings;
-            AutoLockSeconds = settings.AutoLockMinutes * 60;
+            ApplyVaultSettings();
             idle.Reset();
             Flash(L.T("Настройки сохранены", "Settings saved"));
 
@@ -2218,7 +2468,17 @@ namespace KeyBox.UI
         {
             if (!LockRequested && !ReopenRequested && dirty && e.CloseReason == CloseReason.UserClosing)
             {
-                if (!SaveVault() &&
+                bool saved;
+                exiting = true;
+                try
+                {
+                    saved = SaveVault();
+                }
+                finally
+                {
+                    exiting = false;
+                }
+                if (!saved &&
                     !MsgBox.ConfirmDanger(this, L.T("Выход без сохранения", "Exit without saving"),
                         L.T("Последние изменения не записаны в файл и будут потеряны.\n\nВсё равно выйти?",
                             "The latest changes have not been written to the file and will be lost.\n\nExit anyway?"),

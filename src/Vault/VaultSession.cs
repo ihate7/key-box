@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Security;
+using System.Security.Cryptography;
 using KeyBox.Crypto;
 
 namespace KeyBox.Vault
@@ -20,6 +21,20 @@ namespace KeyBox.Vault
         private byte[] keyFileHash;
         private bool disposed;
 
+        // Каким эта сессия видела файл в последний раз (прочитала или записала сама): хеш
+        // содержимого, размер и время изменения. По ним видно, что файл изменил кто-то ещё —
+        // другая копия программы на другом компьютере, через облачную папку.
+        private byte[] fileHash;
+        private long seenLength = -1;
+        private DateTime seenTime;
+
+        // Что влилось из файла и ещё не показано пользователю.
+        private MergeResult merged;
+
+        // Сколько раз подряд файл дописан при проверке (Reload) без участия пользователя.
+        private const int MaxUnattendedWrites = 3;
+        private int unattendedWrites;
+
         private VaultSession()
         {
         }
@@ -38,6 +53,26 @@ namespace KeyBox.Vault
         public KdfParameters Protection
         {
             get { return kdf.Clone(); }
+        }
+
+        /// <summary>
+        /// true, если в открытых данных есть то, чего нет в файле: дописать файл при проверке
+        /// не удалось либо программа перестала дописывать его сама (см. Reload).
+        /// </summary>
+        public bool HasUnwrittenChanges { get; private set; }
+
+        /// <summary>
+        /// Что влилось из файла с прошлого вызова — при сохранениях и проверках файла.
+        /// Возвращает null, если за это время файл никто, кроме нас, не менял.
+        /// </summary>
+        public MergeResult TakeMerge()
+        {
+            lock (sync)
+            {
+                MergeResult result = merged;
+                merged = null;
+                return result;
+            }
         }
 
         /// <summary>true, если хранилище открывается мастер-паролем вместе с ключевым файлом.</summary>
@@ -148,6 +183,7 @@ namespace KeyBox.Vault
                 session.kdf = header.Kdf;
                 session.keyFileHash = fileHash;
                 session.key = key;
+                session.Remember(file);
                 key = null; // ключом теперь владеет сессия
                 fileHash = null;
                 return session;
@@ -160,24 +196,324 @@ namespace KeyBox.Vault
             }
         }
 
-        /// <summary>Шифрует текущие данные и записывает файл хранилища.</summary>
+        /// <summary>
+        /// Шифрует текущие данные и записывает файл хранилища. Если файл за это время изменил
+        /// кто-то ещё (другой компьютер через общую или облачную папку), его изменения сначала
+        /// вливаются в открытые данные — чужая работа не затирается. Что влилось, отдаёт TakeMerge.
+        /// </summary>
         public void Save()
         {
             lock (sync)
             {
                 if (disposed) throw new ObjectDisposedException("VaultSession");
+                MergeFromDisk();
+                WriteCurrent();
+                unattendedWrites = 0;
+            }
+        }
 
-                byte[] json = Data.ToJson();
+        /// <summary>
+        /// Проверяет, не изменил ли файл кто-то ещё, и если да — вливает изменения в открытые
+        /// данные. Если в них после этого есть то, чего нет в файле, файл дописывается.
+        /// Возвращает true, если файл был изменён не нами и прочитан; что влилось, отдаёт TakeMerge.
+        /// </summary>
+        public bool Reload()
+        {
+            lock (sync)
+            {
+                if (disposed || !LooksChanged()) return false;
+
+                byte[] disk;
                 try
                 {
-                    byte[] file = VaultFormat.Seal(key, kdf, json);
-                    WriteFile(FilePath, file);
+                    disk = ReadIfChanged();
+                }
+                catch (VaultException)
+                {
+                    return false; // файл занят (его как раз пишут) — заглянем при следующей проверке
+                }
+                if (disk == null) return false;
+
+                VaultData theirs = OpenForeign(disk);
+                if (theirs == null)
+                {
+                    // Не читается: записан не до конца или испорчен. Перечитывать его при каждой
+                    // проверке незачем — ждём, пока изменится снова; ближайшее сохранение его заменит.
+                    RememberFileInfo();
+                    return false;
+                }
+
+                Note(Data.Merge(theirs));
+                if (Data.ContentEquals(theirs))
+                {
+                    // В файле уже есть всё, что есть у нас: переписывать его незачем.
+                    Remember(disk);
+                    unattendedWrites = 0;
+                    HasUnwrittenChanges = false;
+                }
+                else if (unattendedWrites < MaxUnattendedWrites)
+                {
+                    // У нас есть то, чего нет в файле (например, облако оставило чужую версию
+                    // вместо нашей) — дописываем, чтобы это дошло и до других компьютеров.
+                    unattendedWrites++;
+                    try
+                    {
+                        WriteCurrent();
+                    }
+                    catch (VaultException) { HasUnwrittenChanges = true; }
+                    catch (CryptographicException) { HasUnwrittenChanges = true; }
+                }
+                else
+                {
+                    // Файл несколько раз подряд возвращается без наших изменений: кто-то упорно пишет
+                    // свою версию. Чтобы две программы не переписывали файл друг за другом без конца,
+                    // дальше он дописывается только при обычном сохранении.
+                    Remember(disk);
+                    HasUnwrittenChanges = true;
+                }
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Читает другой файл — копию этого же хранилища с тем же мастер-паролем (например,
+        /// «конфликтующую копию» из облачной папки). Возвращает его данные или null, если файл
+        /// зашифрован другим ключом и для него нужен свой пароль.
+        /// </summary>
+        public VaultData ReadCopy(string path)
+        {
+            byte[] file = ReadFile(path);
+            lock (sync)
+            {
+                if (disposed) throw new ObjectDisposedException("VaultSession");
+                VaultHeader header = VaultFormat.ParseHeader(file);
+                if (!SameProtection(header.Kdf, kdf)) return null;
+
+                byte[] json;
+                try
+                {
+                    json = VaultFormat.Open(key, file);
+                }
+                catch (VaultException)
+                {
+                    return null;
+                }
+                try
+                {
+                    return VaultData.FromJson(json);
                 }
                 finally
                 {
                     Array.Clear(json, 0, json.Length);
                 }
             }
+        }
+
+        /// <summary>
+        /// Записывает открытые данные (нынешним ключом) в отдельный файл рядом с хранилищем —
+        /// на случай, когда сам файл хранилища перезаписывать нельзя. Возвращает путь к файлу.
+        /// </summary>
+        /// <param name="path">Куда писать; null — подобрать имя вида «имя.conflict-дата-время.vault».</param>
+        public string SaveConflictCopy(string path)
+        {
+            lock (sync)
+            {
+                if (disposed) throw new ObjectDisposedException("VaultSession");
+                if (path == null)
+                {
+                    string directory = Path.GetDirectoryName(FilePath) ?? "";
+                    string name = Path.GetFileNameWithoutExtension(FilePath) + ".conflict-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                    string extension = Path.GetExtension(FilePath);
+                    path = Path.Combine(directory, name + extension);
+                    for (int n = 2; File.Exists(path); n++)
+                    {
+                        path = Path.Combine(directory, name + "-" + n + extension);
+                    }
+                }
+
+                byte[] json = Data.ToJson();
+                try
+                {
+                    WriteFile(path, VaultFormat.Seal(key, kdf, json));
+                }
+                finally
+                {
+                    Array.Clear(json, 0, json.Length);
+                }
+                return path;
+            }
+        }
+
+        /// <summary>Шифрует текущие данные и записывает файл, не заглядывая в то, что сейчас лежит на диске.</summary>
+        private void WriteCurrent()
+        {
+            byte[] json = Data.ToJson();
+            try
+            {
+                byte[] file = VaultFormat.Seal(key, kdf, json);
+                WriteFile(FilePath, file);
+                Remember(file);
+                HasUnwrittenChanges = false;
+            }
+            finally
+            {
+                Array.Clear(json, 0, json.Length);
+            }
+        }
+
+        /// <summary>Если файл на диске изменил кто-то ещё, вливает его содержимое в открытые данные.</summary>
+        private void MergeFromDisk()
+        {
+            byte[] disk;
+            try
+            {
+                disk = ReadIfChanged();
+            }
+            catch (VaultException ex)
+            {
+                // Файл такого размера хранилищем быть не может: беречь в нём нечего.
+                if (ex.Error == VaultError.BadFormat) return;
+                throw;
+            }
+            if (disk == null) return;
+
+            // Файл, который не читается нашим же ключом, записан не до конца или испорчен: беречь
+            // в нём нечего, он будет заменён (а сам останется рядом как резервная копия).
+            VaultData theirs = OpenForeign(disk);
+            if (theirs != null) Note(Data.Merge(theirs));
+        }
+
+        private void Note(MergeResult result)
+        {
+            if (merged == null) merged = result;
+            else merged.Add(result);
+        }
+
+        /// <summary>Содержимое файла, если оно не то, что эта сессия читала или писала; иначе null.</summary>
+        private byte[] ReadIfChanged()
+        {
+            if (!File.Exists(FilePath)) return null;
+            byte[] disk = ReadFile(FilePath);
+            if (fileHash != null && SameBytes(Hash(disk), fileHash))
+            {
+                RememberFileInfo();
+                return null;
+            }
+            return disk;
+        }
+
+        /// <summary>
+        /// Расшифровывает файл, изменённый не нами. Возвращает null, если он не читается вовсе.
+        /// Бросает исключение, если его нельзя ни прочитать нашим ключом, ни затереть: там сменили
+        /// пароль или защиту либо его записала более новая версия программы.
+        /// </summary>
+        private VaultData OpenForeign(byte[] disk)
+        {
+            VaultHeader header;
+            try
+            {
+                header = VaultFormat.ParseHeader(disk);
+            }
+            catch (VaultException ex)
+            {
+                if (ex.Error == VaultError.UnsupportedVersion) throw NewerVersion(ex);
+                return null;
+            }
+
+            if (!SameProtection(header.Kdf, kdf))
+            {
+                throw new VaultException(VaultError.Conflict,
+                    L.T("Файл хранилища изменён в другом месте, и нынешним ключом он уже не открывается: похоже, там сменили мастер-пароль или защиту.",
+                        "The vault file was changed elsewhere and can no longer be opened with the current key: it looks like the master password or the protection was changed there."));
+            }
+
+            byte[] json;
+            try
+            {
+                json = VaultFormat.Open(key, disk);
+            }
+            catch (VaultException)
+            {
+                return null;
+            }
+
+            try
+            {
+                return VaultData.FromJson(json);
+            }
+            catch (VaultException ex)
+            {
+                if (ex.Error == VaultError.UnsupportedVersion) throw NewerVersion(ex);
+                return null;
+            }
+            finally
+            {
+                Array.Clear(json, 0, json.Length);
+            }
+        }
+
+        private static VaultException NewerVersion(Exception inner)
+        {
+            return new VaultException(VaultError.Conflict,
+                L.T("Файл хранилища изменён более новой версией KeyBox: эта версия не может его прочитать и не станет его перезаписывать. Обновите программу.",
+                    "The vault file was changed by a newer version of KeyBox: this version cannot read it and will not overwrite it. Update the program."),
+                inner);
+        }
+
+        private static bool SameProtection(KdfParameters a, KdfParameters b)
+        {
+            return a.Kdf == b.Kdf && a.Iterations == b.Iterations && a.MemoryKiB == b.MemoryKiB &&
+                   a.Parallelism == b.Parallelism && a.KeyFile == b.KeyFile && SameBytes(a.Salt, b.Salt);
+        }
+
+        private void Remember(byte[] file)
+        {
+            fileHash = Hash(file);
+            RememberFileInfo();
+        }
+
+        private void RememberFileInfo()
+        {
+            try
+            {
+                var info = new FileInfo(FilePath);
+                seenLength = info.Exists ? info.Length : -1;
+                seenTime = info.Exists ? info.LastWriteTimeUtc : DateTime.MinValue;
+            }
+            catch (IOException) { seenLength = -1; }
+            catch (UnauthorizedAccessException) { seenLength = -1; }
+            catch (SecurityException) { seenLength = -1; }
+        }
+
+        /// <summary>Быстрая проверка без чтения файла: изменились ли его размер или время записи.</summary>
+        private bool LooksChanged()
+        {
+            try
+            {
+                var info = new FileInfo(FilePath);
+                return info.Exists && (info.Length != seenLength || info.LastWriteTimeUtc != seenTime);
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (SecurityException) { return false; }
+        }
+
+        private static byte[] Hash(byte[] data)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                return sha.ComputeHash(data);
+            }
+        }
+
+        private static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
         }
 
         /// <summary>Проверяет, что пароль — действующий мастер-пароль этого хранилища.</summary>
@@ -255,6 +591,18 @@ namespace KeyBox.Vault
                     throw new ObjectDisposedException("VaultSession");
                 }
 
+                // Если файл успели изменить в другом месте, его изменения вливаются сейчас,
+                // пока он ещё открывается прежним ключом.
+                try
+                {
+                    MergeFromDisk();
+                }
+                catch
+                {
+                    Array.Clear(newKey, 0, newKey.Length);
+                    throw;
+                }
+
                 byte[] oldKey = key;
                 byte[] oldFileHash = keyFileHash;
                 KdfParameters oldKdf = kdf;
@@ -264,7 +612,7 @@ namespace KeyBox.Vault
                 kdf = newKdf;
                 try
                 {
-                    Save();
+                    WriteCurrent();
                 }
                 catch
                 {
@@ -276,6 +624,7 @@ namespace KeyBox.Vault
                 }
                 Array.Clear(oldKey, 0, oldKey.Length);
                 if (oldFileHash != null) Array.Clear(oldFileHash, 0, oldFileHash.Length);
+                unattendedWrites = 0;
 
                 // Резервная копия осталась зашифрованной прежним ключом. Заменяем её копией нового
                 // файла, чтобы прежний пароль (и прежний ключевой файл) больше ничего не открывал.

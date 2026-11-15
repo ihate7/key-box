@@ -124,6 +124,61 @@ namespace KeyBox.Vault
 
         [DataMember(Name = "when", Order = 1)]
         public string When { get; set; }
+
+        /// <summary>
+        /// Только для групп: куда ушло содержимое удалённой группы (идентификатор группы уровнем
+        /// выше или null). По нему обе копии одинаково решают, куда девать запись, которая в другой
+        /// копии ещё числится в удалённой группе.
+        /// </summary>
+        [DataMember(Name = "into", Order = 2, EmitDefaultValue = false)]
+        public string Into { get; set; }
+    }
+
+    /// <summary>Что изменилось в хранилище при объединении с другой копией.</summary>
+    internal sealed class MergeResult
+    {
+        public int EntriesAdded;
+        public int EntriesUpdated;
+        public int EntriesRemoved;
+        public int GroupsAdded;
+        public int GroupsUpdated;
+        public int GroupsRemoved;
+        public bool SettingsUpdated;
+
+        /// <summary>true, если объединение хоть что-нибудь изменило в этой копии.</summary>
+        public bool Changed
+        {
+            get
+            {
+                return EntriesAdded + EntriesUpdated + EntriesRemoved + GroupsAdded + GroupsUpdated + GroupsRemoved > 0 || SettingsUpdated;
+            }
+        }
+
+        /// <summary>Прибавляет итог ещё одного объединения.</summary>
+        public void Add(MergeResult other)
+        {
+            if (other == null) return;
+            EntriesAdded += other.EntriesAdded;
+            EntriesUpdated += other.EntriesUpdated;
+            EntriesRemoved += other.EntriesRemoved;
+            GroupsAdded += other.GroupsAdded;
+            GroupsUpdated += other.GroupsUpdated;
+            GroupsRemoved += other.GroupsRemoved;
+            SettingsUpdated |= other.SettingsUpdated;
+        }
+
+        /// <summary>Короткий итог для строки состояния: «записей добавлено: 2, изменено: 1».</summary>
+        public string Describe()
+        {
+            var parts = new List<string>();
+            if (EntriesAdded > 0) parts.Add(L.F("записей добавлено: {0}", "entries added: {0}", EntriesAdded));
+            if (EntriesUpdated > 0) parts.Add(L.F("записей изменено: {0}", "entries changed: {0}", EntriesUpdated));
+            if (EntriesRemoved > 0) parts.Add(L.F("записей удалено: {0}", "entries removed: {0}", EntriesRemoved));
+            int groups = GroupsAdded + GroupsUpdated + GroupsRemoved;
+            if (groups > 0) parts.Add(L.F("изменений в группах: {0}", "group changes: {0}", groups));
+            if (SettingsUpdated) parts.Add(L.T("обновлены настройки", "settings updated"));
+            return parts.Count == 0 ? L.T("изменений нет", "no changes") : string.Join(", ", parts.ToArray());
+        }
     }
 
     /// <summary>Настройки, которые хранятся внутри хранилища и переезжают вместе с ним.</summary>
@@ -636,7 +691,7 @@ namespace KeyBox.Vault
                     if (!entry.IsDeleted) released++;
                 }
             }
-            foreach (string removedId in removed) AddTombstone(removedId, now);
+            foreach (string removedId in removed) AddTombstone(removedId, now, destination);
             Groups.RemoveAll(delegate(Group candidate) { return removed.Contains(candidate.Id); });
             return released;
         }
@@ -960,18 +1015,25 @@ namespace KeyBox.Vault
 
         private void AddTombstone(string id, string when)
         {
+            AddTombstone(id, when, null);
+        }
+
+        private void AddTombstone(string id, string when, string into)
+        {
             if (Removed == null) Removed = new List<Tombstone>();
             foreach (Tombstone existing in Removed)
             {
                 if (existing.Id == id)
                 {
                     existing.When = when;
+                    existing.Into = into;
                     return;
                 }
             }
             var tombstone = new Tombstone();
             tombstone.Id = id;
             tombstone.When = when;
+            tombstone.Into = into;
             Removed.Add(tombstone);
         }
 
@@ -1050,6 +1112,388 @@ namespace KeyBox.Vault
         private static bool Contains(string text, string term)
         {
             return !string.IsNullOrEmpty(text) && text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // ---------- Объединение копий ----------
+
+        /// <summary>
+        /// Вливает в это хранилище изменения из другой его копии — с другого компьютера или
+        /// из облачной папки. Записи и группы сопоставляются по идентификаторам. Где изменены обе
+        /// копии, побеждает более позднее изменение; пароль проигравшей стороны уходит в историю
+        /// записи. Удалённое не «воскресает»: о нём помнят следы удаления.
+        ///
+        /// Результат не зависит от того, какая копия объединяется с какой: после взаимного
+        /// объединения обе содержат одно и то же (это проверяет ContentEquals).
+        /// </summary>
+        public MergeResult Merge(VaultData other)
+        {
+            if (other == null) throw new ArgumentNullException("other");
+            var result = new MergeResult();
+
+            // 1. Следы удалённого из обеих копий; для каждого идентификатора — позднейший.
+            var tombstones = new Dictionary<string, Tombstone>();
+            CollectTombstones(Removed, tombstones);
+            CollectTombstones(other.Removed, tombstones);
+
+            // 2. Группы.
+            var myGroups = new Dictionary<string, Group>();
+            foreach (Group group in Groups) myGroups[group.Id] = group;
+            var theirGroupIds = new HashSet<string>();
+            foreach (Group theirs in other.Groups)
+            {
+                theirGroupIds.Add(theirs.Id);
+                Group mine;
+                if (myGroups.TryGetValue(theirs.Id, out mine))
+                {
+                    if (Prefer(theirs.Changed, GroupText(theirs), mine.Changed, GroupText(mine)))
+                    {
+                        if (mine.Name != theirs.Name || mine.ParentId != theirs.ParentId) result.GroupsUpdated++;
+                        mine.Name = theirs.Name;
+                        mine.ParentId = theirs.ParentId;
+                        mine.Changed = theirs.Changed;
+                    }
+                }
+                else if (!RemovedLater(tombstones, theirs.Id, theirs.Changed))
+                {
+                    var copy = new Group();
+                    copy.Id = theirs.Id;
+                    copy.Name = theirs.Name;
+                    copy.ParentId = theirs.ParentId;
+                    copy.Changed = theirs.Changed;
+                    Groups.Add(copy);
+                    result.GroupsAdded++;
+                }
+            }
+            result.GroupsRemoved += Groups.RemoveAll(delegate(Group mine)
+            {
+                return !theirGroupIds.Contains(mine.Id) && RemovedLater(tombstones, mine.Id, mine.Changed);
+            });
+
+            // 3. Записи.
+            var myEntries = new Dictionary<string, Entry>();
+            foreach (Entry entry in Entries) myEntries[entry.Id] = entry;
+            var theirEntryIds = new HashSet<string>();
+            foreach (Entry theirs in other.Entries)
+            {
+                theirEntryIds.Add(theirs.Id);
+                Entry mine;
+                if (myEntries.TryGetValue(theirs.Id, out mine))
+                {
+                    string myText = EntryText(mine);
+                    string theirText = EntryText(theirs);
+                    if (myText == theirText) continue;
+
+                    if (Prefer(Stamp(theirs), theirText, Stamp(mine), myText))
+                    {
+                        string lostPassword = mine.Password;
+                        string lostStamp = Stamp(mine);
+                        CopyEntry(theirs, mine);
+                        KeepLostPassword(mine, lostPassword, lostStamp);
+                        result.EntriesUpdated++;
+                    }
+                    else
+                    {
+                        // Наша версия новее. Их пароль, если он другой, не теряется: он уходит в историю.
+                        KeepLostPassword(mine, theirs.Password, Stamp(theirs));
+                    }
+                }
+                else if (!RemovedLater(tombstones, theirs.Id, Stamp(theirs)))
+                {
+                    var copy = new Entry();
+                    copy.Id = theirs.Id;
+                    CopyEntry(theirs, copy);
+                    Entries.Add(copy);
+                    result.EntriesAdded++;
+                }
+            }
+            result.EntriesRemoved += Entries.RemoveAll(delegate(Entry mine)
+            {
+                return !theirEntryIds.Contains(mine.Id) && RemovedLater(tombstones, mine.Id, Stamp(mine));
+            });
+
+            // 4. Настройки — целиком те, что изменены позже.
+            if (other.Settings != null &&
+                (Settings == null || Prefer(other.Settings.Changed, SettingsText(other.Settings), Settings.Changed, SettingsText(Settings))))
+            {
+                if (Settings == null || !Settings.SameAs(other.Settings)) result.SettingsUpdated = true;
+                Settings = other.Settings.Clone();
+            }
+
+            // 5. Наведение порядка — по правилам, которые в обеих копиях дают одно и то же.
+            var existing = new HashSet<string>();
+            foreach (Group group in Groups) existing.Add(group.Id);
+            foreach (Entry entry in Entries) existing.Add(entry.Id);
+            Removed = null;
+            foreach (Tombstone tombstone in tombstones.Values)
+            {
+                if (existing.Contains(tombstone.Id)) continue; // пережившее удаление в следе не нуждается
+                if (Removed == null) Removed = new List<Tombstone>();
+                Removed.Add(tombstone);
+            }
+
+            ResolveRemovedGroups(tombstones);
+            BreakCycles();
+            while (MergeSameNamedSiblings(tombstones))
+            {
+                ResolveRemovedGroups(tombstones);
+            }
+
+            Normalize();
+            return result;
+        }
+
+        /// <summary>
+        /// true, если в обеих копиях одно и то же: те же группы, записи, настройки и следы удалённого.
+        /// Порядок следования значения не имеет.
+        /// </summary>
+        public bool ContentEquals(VaultData other)
+        {
+            return other != null && Canonical() == other.Canonical();
+        }
+
+        private string Canonical()
+        {
+            var lines = new List<string>();
+            foreach (Group group in Groups) lines.Add("G" + GroupText(group) + Unit + group.Changed);
+            foreach (Entry entry in Entries) lines.Add("E" + EntryText(entry));
+            if (Removed != null)
+            {
+                foreach (Tombstone tombstone in Removed) lines.Add("R" + tombstone.Id + Unit + tombstone.When + Unit + tombstone.Into);
+            }
+            if (Settings != null) lines.Add("S" + SettingsText(Settings) + Unit + Settings.Changed);
+            lines.Sort(StringComparer.Ordinal);
+            return string.Join("\n", lines.ToArray());
+        }
+
+        // Разделитель полей в текстовом виде записи: служебный символ, которого нет в обычном тексте.
+        private const char Unit = (char)0x1F;
+
+        private static string GroupText(Group group)
+        {
+            return group.Id + Unit + group.Name + Unit + group.ParentId;
+        }
+
+        private static string EntryText(Entry entry)
+        {
+            var text = new System.Text.StringBuilder();
+            foreach (string field in new[]
+            {
+                entry.Id, entry.GroupId, entry.Login, entry.Password, entry.Description, entry.Url, entry.Totp,
+                entry.Created, entry.Modified, entry.Changed, entry.Deleted
+            })
+            {
+                text.Append(field).Append(Unit);
+            }
+            if (entry.History != null)
+            {
+                foreach (PasswordRecord record in entry.History)
+                {
+                    text.Append(record.Password).Append(Unit).Append(record.Replaced).Append(Unit);
+                }
+            }
+            return text.ToString();
+        }
+
+        private static string SettingsText(VaultSettings settings)
+        {
+            return string.Join(Unit.ToString(), new[]
+            {
+                settings.Language, settings.AutoLockMinutes.ToString(), settings.ClipboardSeconds.ToString(), settings.PasswordLength.ToString(),
+                settings.PasswordUpper.ToString(), settings.PasswordLower.ToString(), settings.PasswordDigits.ToString(),
+                settings.PasswordSymbols.ToString(), settings.PasswordNoLookAlikes.ToString(), settings.AutoTypeEnter.ToString()
+            });
+        }
+
+        /// <summary>Время последнего изменения записи любого рода.</summary>
+        private static string Stamp(Entry entry)
+        {
+            if (!string.IsNullOrEmpty(entry.Changed)) return entry.Changed;
+            return !string.IsNullOrEmpty(entry.Modified) ? entry.Modified : entry.Created;
+        }
+
+        /// <summary>
+        /// Чья версия берётся: та, что изменена позже. При одинаковом времени решает содержимое —
+        /// правило произвольное, но одинаковое для обеих копий, иначе они не сошлись бы.
+        /// </summary>
+        private static bool Prefer(string theirStamp, string theirText, string myStamp, string myText)
+        {
+            int order = CompareStamps(theirStamp, myStamp);
+            if (order != 0) return order > 0;
+            return string.CompareOrdinal(theirText, myText) > 0;
+        }
+
+        private static int CompareStamps(string a, string b)
+        {
+            DateTime first;
+            DateTime second;
+            bool hasFirst = TryParseUtc(a, out first);
+            bool hasSecond = TryParseUtc(b, out second);
+            if (hasFirst && hasSecond) return first.CompareTo(second);
+            if (hasFirst != hasSecond) return hasFirst ? 1 : -1;
+            return string.CompareOrdinal(a ?? "", b ?? "");
+        }
+
+        private static void CollectTombstones(List<Tombstone> source, Dictionary<string, Tombstone> target)
+        {
+            if (source == null) return;
+            foreach (Tombstone tombstone in source)
+            {
+                if (tombstone == null || string.IsNullOrEmpty(tombstone.Id)) continue;
+                Tombstone known;
+                if (!target.TryGetValue(tombstone.Id, out known) ||
+                    Prefer(tombstone.When, tombstone.Into ?? "", known.When, known.Into ?? ""))
+                {
+                    var copy = new Tombstone();
+                    copy.Id = tombstone.Id;
+                    copy.When = tombstone.When;
+                    copy.Into = tombstone.Into;
+                    target[tombstone.Id] = copy;
+                }
+            }
+        }
+
+        /// <summary>true, если есть след удаления не старше последнего изменения: удаление «победило».</summary>
+        private static bool RemovedLater(Dictionary<string, Tombstone> tombstones, string id, string changed)
+        {
+            Tombstone tombstone;
+            return tombstones.TryGetValue(id, out tombstone) && CompareStamps(tombstone.When, changed) >= 0;
+        }
+
+        private static void CopyEntry(Entry from, Entry to)
+        {
+            to.GroupId = from.GroupId;
+            to.Login = from.Login;
+            to.Password = from.Password;
+            to.Description = from.Description;
+            to.Url = from.Url;
+            to.Totp = from.Totp;
+            to.Created = from.Created;
+            to.Modified = from.Modified;
+            to.Changed = from.Changed;
+            to.Deleted = from.Deleted;
+            to.History = null;
+            if (from.History != null)
+            {
+                to.History = new List<PasswordRecord>();
+                foreach (PasswordRecord record in from.History)
+                {
+                    var copy = new PasswordRecord();
+                    copy.Password = record.Password;
+                    copy.Replaced = record.Replaced;
+                    to.History.Add(copy);
+                }
+            }
+        }
+
+        /// <summary>Пароль проигравшей версии записи сохраняется в её истории (если его там ещё нет).</summary>
+        private static void KeepLostPassword(Entry entry, string password, string when)
+        {
+            if (string.IsNullOrEmpty(password) || password == entry.Password) return;
+            if (entry.History != null)
+            {
+                foreach (PasswordRecord record in entry.History)
+                {
+                    if (record.Password == password) return;
+                }
+            }
+            RememberPassword(entry, password, when);
+        }
+
+        /// <summary>
+        /// Записи и подгруппы, которые ссылаются на удалённую группу, переходят туда, куда ушло
+        /// её содержимое (это записано в следе удаления), а если это неизвестно — на верхний уровень.
+        /// </summary>
+        private void ResolveRemovedGroups(Dictionary<string, Tombstone> tombstones)
+        {
+            var existing = new HashSet<string>();
+            foreach (Group group in Groups) existing.Add(group.Id);
+
+            foreach (Group group in Groups)
+            {
+                group.ParentId = ResolveGroup(group.ParentId, existing, tombstones);
+                if (group.ParentId == group.Id) group.ParentId = null;
+            }
+            foreach (Entry entry in Entries)
+            {
+                entry.GroupId = ResolveGroup(entry.GroupId, existing, tombstones);
+            }
+        }
+
+        private static string ResolveGroup(string id, HashSet<string> existing, Dictionary<string, Tombstone> tombstones)
+        {
+            for (int guard = 0; guard <= tombstones.Count; guard++)
+            {
+                if (string.IsNullOrEmpty(id)) return null;
+                if (existing.Contains(id)) return id;
+                Tombstone tombstone;
+                if (!tombstones.TryGetValue(id, out tombstone)) return null;
+                id = tombstone.Into;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Кольца (одна копия вложила А в Б, другая — Б в А) разрываются на группе с наименьшим
+        /// идентификатором: так обе копии разорвут кольцо в одном и том же месте.
+        /// </summary>
+        private void BreakCycles()
+        {
+            bool found = true;
+            while (found)
+            {
+                found = false;
+                foreach (Group group in Groups)
+                {
+                    var ring = new List<Group>();
+                    Group current = group;
+                    while (current != null && !ring.Contains(current))
+                    {
+                        ring.Add(current);
+                        current = FindGroup(current.ParentId);
+                    }
+                    if (current == null) continue;
+
+                    // current замыкает кольцо: ищем в нём группу с наименьшим идентификатором.
+                    Group lowest = current;
+                    for (Group member = FindGroup(current.ParentId); member != null && member != current; member = FindGroup(member.ParentId))
+                    {
+                        if (string.CompareOrdinal(member.Id, lowest.Id) < 0) lowest = member;
+                    }
+                    lowest.ParentId = null;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Две группы с одним названием в одном месте (их создали в разных копиях) сливаются в одну —
+        /// ту, у которой идентификатор меньше. Возвращает true, если что-то слилось.
+        /// </summary>
+        private bool MergeSameNamedSiblings(Dictionary<string, Tombstone> tombstones)
+        {
+            foreach (Group keep in Groups)
+            {
+                foreach (Group drop in Groups)
+                {
+                    if (keep == drop || keep.ParentId != drop.ParentId) continue;
+                    if (!string.Equals(keep.Name, drop.Name, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.CompareOrdinal(keep.Id, drop.Id) > 0) continue;
+
+                    var tombstone = new Tombstone();
+                    tombstone.Id = drop.Id;
+                    tombstone.When = CompareStamps(keep.Changed, drop.Changed) >= 0 ? keep.Changed : drop.Changed;
+                    tombstone.Into = keep.Id;
+                    tombstones[drop.Id] = tombstone;
+                    if (Removed == null) Removed = new List<Tombstone>();
+                    Removed.RemoveAll(delegate(Tombstone known) { return known.Id == drop.Id; });
+                    Removed.Add(tombstone);
+
+                    Groups.Remove(drop);
+                    return true;
+                }
+            }
+            return false;
         }
 
         // ---------- JSON ----------

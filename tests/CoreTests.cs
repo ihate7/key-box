@@ -83,6 +83,13 @@ namespace KeyBox.Tests
             Run("model: trash", ModelTrash);
             Run("model: settings", ModelSettings);
             Run("model: structure version 3 only when it is needed", ModelVersion3);
+            Run("merge: additions and edits from both copies", MergeAdditionsAndEdits);
+            Run("merge: deletions, the trash and resurrection", MergeDeletions);
+            Run("merge: groups renamed, moved, deleted, duplicated", MergeGroups);
+            Run("merge: settings and the order of merging", MergeSettingsAndSymmetry);
+            Run("shared file: two open copies do not overwrite each other", SharedFileMerge);
+            Run("shared file: a check picks up changes and writes back what is missing", SharedFileReload);
+            Run("shared file: password changed elsewhere, newer version, damaged file", SharedFileConflict);
             Run("csv: quotes, separators, line breaks", CsvParsing);
             Run("import: files of browsers and password managers", ImportFormats);
             Run("import: groups, one-time codes, odd rows", ImportIntoVault);
@@ -1754,6 +1761,554 @@ namespace KeyBox.Tests
             Check(first.Url == null && first.Totp == null && first.History == null && !first.IsDeleted && old.Settings == null && old.Removed == null,
                 "the new fields are simply absent in an old file");
             Check(old.LiveCount == 1 && old.EffectiveSettings.AutoLockMinutes == 5, "an old file works with the defaults");
+        }
+
+        // ---------- Объединение копий ----------
+
+        /// <summary>Вторая копия хранилища — как если бы файл открыли на другом компьютере.</summary>
+        private static VaultData CopyOf(VaultData data)
+        {
+            return VaultData.FromJson(data.ToJson());
+        }
+
+        /// <summary>Сдвигает время изменения: копии в тестах меняются «в разное время», а не в одну секунду.</summary>
+        private static void Touch(Entry entry, string when)
+        {
+            entry.Changed = when;
+            entry.Modified = when;
+        }
+
+        /// <summary>Объединяет копии друг с другом и проверяет, что обе пришли к одному и тому же.</summary>
+        private static void MergeBothWays(VaultData a, VaultData b, string what)
+        {
+            VaultData beforeA = CopyOf(a);
+            a.Merge(b);
+            b.Merge(beforeA);
+            Check(a.ContentEquals(b), what + ": both copies end up the same");
+
+            // Повторное объединение ничего не меняет.
+            Check(!a.Merge(CopyOf(b)).Changed && !b.Merge(CopyOf(a)).Changed && a.ContentEquals(b), what + ": merging again changes nothing");
+        }
+
+        private static void MergeAdditionsAndEdits()
+        {
+            VaultData a = VaultData.CreateEmpty();
+            Group work = a.AddGroup("Работа");
+            Entry shared = a.AddEntry(work.Id, "user", "old-password", "Общая запись");
+            Entry untouched = a.AddEntry(null, "same", "same", "Не менялась");
+            Touch(shared, "2026-01-01T10:00:00Z");
+            VaultData b = CopyOf(a);
+            Check(a.ContentEquals(b) && !a.Merge(CopyOf(b)).Changed, "identical copies: nothing to merge");
+
+            // В каждой копии появляется своя запись.
+            Entry onlyA = a.AddEntry(null, "a", "pa", "Только в первой");
+            Entry onlyB = b.AddEntry(work.Id, "b", "pb", "Только во второй");
+
+            // Общую запись меняют обе стороны; вторая — позже.
+            a.UpdateEntry(shared.Id, work.Id, "user", "password-from-a", "Общая запись");
+            Touch(a.FindEntry(shared.Id), "2026-01-02T10:00:00Z");
+            b.UpdateEntry(shared.Id, null, "user-b", "password-from-b", "Общая запись, вторая копия");
+            Touch(b.FindEntry(shared.Id), "2026-01-03T10:00:00Z");
+
+            VaultData beforeA = CopyOf(a);
+            MergeResult result = a.Merge(b);
+            Check(result.EntriesAdded == 1 && result.EntriesUpdated == 1 && result.EntriesRemoved == 0 && result.Changed, "what changed in the first copy");
+            Check(a.Entries.Count == 4 && a.FindEntry(onlyA.Id) != null && a.FindEntry(onlyB.Id) != null, "entries of both copies are present");
+            Check(a.FindEntry(onlyB.Id).GroupId == work.Id && a.FindEntry(onlyB.Id).Password == "pb", "the added entry keeps its fields");
+
+            Entry merged = a.FindEntry(shared.Id);
+            Check(merged.Password == "password-from-b" && merged.Login == "user-b" && merged.GroupId == null && merged.Description == "Общая запись, вторая копия",
+                "the later edit wins as a whole");
+            var kept = new List<string>();
+            foreach (PasswordRecord record in merged.History) kept.Add(record.Password);
+            Check(kept.Contains("password-from-a") && kept.Contains("old-password"), "the password of the losing side is kept in the history: " + string.Join(", ", kept.ToArray()));
+            Check(a.FindEntry(untouched.Id).Password == "same", "untouched entries stay as they are");
+
+            MergeResult back = b.Merge(beforeA);
+            Check(back.EntriesAdded == 1 && back.EntriesUpdated == 0, "the second copy only gains the entry it lacked");
+            Check(a.ContentEquals(b), "both copies end up the same");
+            Check(b.FindEntry(shared.Id).History != null && b.FindEntry(shared.Id).History.Count == merged.History.Count, "including the password history");
+
+            // Итог в словах.
+            Check(result.Describe().Contains("добавлено: 1") && result.Describe().Contains("изменено: 1"), "summary: " + result.Describe());
+            Check(new MergeResult().Describe() == "изменений нет", "summary of an empty merge");
+
+            // Правка в одну и ту же секунду: выигрывает одна и та же версия, с какой стороны ни объединяй.
+            VaultData c = VaultData.CreateEmpty();
+            Entry tie = c.AddEntry(null, "tie", "p0", "Одновременно");
+            VaultData d = CopyOf(c);
+            c.UpdateEntry(tie.Id, null, "tie", "p-from-c", "Одновременно");
+            d.UpdateEntry(tie.Id, null, "tie", "p-from-d", "Одновременно");
+            Touch(c.FindEntry(tie.Id), "2026-02-01T00:00:00Z");
+            Touch(d.FindEntry(tie.Id), "2026-02-01T00:00:00Z");
+            MergeBothWays(c, d, "same-second edits");
+        }
+
+        private static void MergeDeletions()
+        {
+            VaultData a = VaultData.CreateEmpty();
+            Entry trashed = a.AddEntry(null, "t", "1", "В корзину");
+            Entry purged = a.AddEntry(null, "p", "2", "Навсегда");
+            Entry edited = a.AddEntry(null, "e", "3", "Удалена там, изменена здесь");
+            Entry stays = a.AddEntry(null, "s", "4", "Остаётся");
+            foreach (Entry entry in a.Entries) Touch(entry, "2026-01-01T00:00:00Z");
+            VaultData b = CopyOf(a);
+
+            // Вторая копия: одну запись в корзину, две стёрты окончательно.
+            b.TrashEntries(new[] { trashed.Id });
+            b.FindEntry(trashed.Id).Changed = "2026-01-05T00:00:00Z";
+            b.DeleteEntries(new[] { purged.Id, edited.Id });
+            foreach (Tombstone tombstone in b.Removed) tombstone.When = "2026-01-05T00:00:00Z";
+
+            // Первая копия: одну из стёртых там записей позже изменили.
+            a.UpdateEntry(edited.Id, null, "e", "new-password", "Удалена там, изменена здесь");
+            Touch(a.FindEntry(edited.Id), "2026-01-06T00:00:00Z");
+
+            VaultData beforeA = CopyOf(a);
+            MergeResult result = a.Merge(b);
+            Check(result.EntriesRemoved == 1 && a.FindEntry(purged.Id) == null, "an entry deleted for good in the other copy is deleted here");
+            Check(a.FindEntry(trashed.Id) != null && a.FindEntry(trashed.Id).IsDeleted, "an entry trashed in the other copy is in the trash here");
+            Check(a.FindEntry(edited.Id) != null && a.FindEntry(edited.Id).Password == "new-password", "an edit made after the deletion wins: the entry survives");
+            Check(a.FindEntry(stays.Id) != null && a.LiveCount == 2 && a.TrashCount == 1, "counts after the merge");
+
+            b.Merge(beforeA);
+            Check(b.FindEntry(edited.Id) != null && b.FindEntry(edited.Id).Password == "new-password", "the surviving entry returns to the copy that deleted it");
+            Check(a.ContentEquals(b), "both copies end up the same");
+
+            // Удалённое не возвращается из третьей, давно не обновлявшейся копии.
+            VaultData stale = VaultData.CreateEmpty();
+            stale.Entries.Add(CloneForTest(beforeA.FindEntry(purged.Id)));
+            Check(!a.Merge(stale).Changed && a.FindEntry(purged.Id) == null, "a stale copy does not bring a deleted entry back");
+
+            // Восстановление из корзины позже удаления — тоже изменение, и оно побеждает.
+            VaultData c = CopyOf(a);
+            c.RestoreEntries(new[] { trashed.Id });
+            c.FindEntry(trashed.Id).Changed = "2026-01-07T00:00:00Z";
+            MergeBothWays(a, c, "restore from the trash");
+            Check(!a.FindEntry(trashed.Id).IsDeleted, "the restored entry is restored in both copies");
+        }
+
+        private static Entry CloneForTest(Entry source)
+        {
+            var copy = new Entry();
+            copy.Id = source.Id;
+            copy.GroupId = source.GroupId;
+            copy.Login = source.Login;
+            copy.Password = source.Password;
+            copy.Description = source.Description;
+            copy.Created = source.Created;
+            copy.Modified = source.Modified;
+            copy.Changed = source.Changed;
+            return copy;
+        }
+
+        private static void MergeGroups()
+        {
+            VaultData a = VaultData.CreateEmpty();
+            Group work = a.AddGroup("Работа");
+            Group servers = a.AddGroup("Серверы", work.Id);
+            Group home = a.AddGroup("Дом");
+            Group doomed = a.AddGroup("Лишняя");
+            Entry inServers = a.AddEntry(servers.Id, "s", "1", "На сервере");
+            Entry inDoomed = a.AddEntry(doomed.Id, "d", "2", "В лишней");
+            foreach (Group group in a.Groups) group.Changed = "2026-01-01T00:00:00Z";
+            foreach (Entry entry in a.Entries) Touch(entry, "2026-01-01T00:00:00Z");
+            VaultData b = CopyOf(a);
+
+            // Первая копия переименовывает группу и создаёт новую.
+            a.RenameGroup(work.Id, "Работа и проекты");
+            a.FindGroup(work.Id).Changed = "2026-01-02T00:00:00Z";
+            Group added = a.AddGroup("Банки");
+
+            // Вторая переносит подгруппу, удаляет группу с записью и тоже создаёт «Банки».
+            b.MoveGroup(servers.Id, home.Id);
+            b.FindGroup(servers.Id).Changed = "2026-01-03T00:00:00Z";
+            b.DeleteGroup(doomed.Id);
+            foreach (Tombstone tombstone in b.Removed) tombstone.When = "2026-01-03T00:00:00Z";
+            b.FindEntry(inDoomed.Id).Changed = "2026-01-03T00:00:00Z";
+            Group addedToo = b.AddGroup("банки");
+            Entry inBanks = b.AddEntry(addedToo.Id, "bank", "3", "Счёт");
+
+            MergeBothWays(a, b, "groups");
+
+            Check(a.FindGroup(work.Id).Name == "Работа и проекты", "the rename from the first copy");
+            Check(a.FindGroup(servers.Id).ParentId == home.Id && a.GroupPath(a.FindEntry(inServers.Id).GroupId) == "Дом / Серверы", "the move from the second copy");
+            Check(a.FindGroup(doomed.Id) == null && a.FindEntry(inDoomed.Id) != null && a.FindEntry(inDoomed.Id).GroupId == null,
+                "the deleted group is gone, its entry stays");
+
+            // Две группы «Банки», созданные порознь, становятся одной; запись остаётся в ней.
+            int banks = 0;
+            foreach (Group group in a.Groups)
+            {
+                if (string.Equals(group.Name, "Банки", StringComparison.OrdinalIgnoreCase)) banks++;
+            }
+            Check(banks == 1 && a.Groups.Count == 4, "same-named groups created apart become one: " + a.Groups.Count + " groups");
+            Group bank = a.FindGroup(a.FindEntry(inBanks.Id).GroupId);
+            Check(bank != null && string.Equals(bank.Name, "Банки", StringComparison.OrdinalIgnoreCase), "the entry is in the surviving group");
+            Check(string.CompareOrdinal(bank.Id, bank.Id == added.Id ? addedToo.Id : added.Id) < 0, "the group with the smaller identifier survives");
+
+            // Запись, которую в другой копии успели изменить, а здесь её группу удалили, не теряется.
+            VaultData c = CopyOf(a);
+            VaultData d = CopyOf(a);
+            c.DeleteGroup(home.Id);
+            foreach (Tombstone tombstone in c.Removed) tombstone.When = "2026-02-01T00:00:00Z";
+            c.FindEntry(inServers.Id).Changed = "2026-02-01T00:00:00Z";
+            d.UpdateEntry(inServers.Id, servers.Id, "s", "newer", "На сервере");
+            Touch(d.FindEntry(inServers.Id), "2026-02-02T00:00:00Z");
+            MergeBothWays(c, d, "an entry edited while its group was deleted");
+            Check(c.FindGroup(home.Id) == null && c.FindGroup(servers.Id) == null, "the deleted branch stays deleted");
+            Check(c.FindEntry(inServers.Id).Password == "newer" && c.FindEntry(inServers.Id).GroupId == null, "the newer entry survives, one level up");
+
+            // Встречные переносы (А в Б и Б в А) не зацикливают дерево.
+            VaultData e = VaultData.CreateEmpty();
+            Group first = e.AddGroup("Первая");
+            Group second = e.AddGroup("Вторая");
+            first.Changed = second.Changed = "2026-01-01T00:00:00Z";
+            VaultData f = CopyOf(e);
+            e.MoveGroup(first.Id, second.Id);
+            e.FindGroup(first.Id).Changed = "2026-03-01T00:00:00Z";
+            f.MoveGroup(second.Id, first.Id);
+            f.FindGroup(second.Id).Changed = "2026-03-02T00:00:00Z";
+            MergeBothWays(e, f, "opposite moves");
+            Check(e.TreeOrder(string.CompareOrdinal).Count == 2, "both groups are still reachable in the tree");
+            Check(e.FindGroup(first.Id).ParentId == null || e.FindGroup(second.Id).ParentId == null, "the ring is broken");
+        }
+
+        private static void MergeSettingsAndSymmetry()
+        {
+            VaultData a = VaultData.CreateEmpty();
+            a.AddEntry(null, "u", "p", "Запись");
+            VaultData b = CopyOf(a);
+
+            VaultSettings older = a.EffectiveSettings;
+            older.AutoLockMinutes = 10;
+            a.UpdateSettings(older);
+            a.Settings.Changed = "2026-01-01T00:00:00Z";
+
+            VaultSettings newer = b.EffectiveSettings;
+            newer.AutoLockMinutes = 30;
+            newer.Language = "en";
+            b.UpdateSettings(newer);
+            b.Settings.Changed = "2026-01-02T00:00:00Z";
+
+            MergeResult result = a.Merge(b);
+            Check(result.SettingsUpdated && result.Changed && a.EffectiveSettings.AutoLockMinutes == 30 && a.EffectiveSettings.Language == "en", "the later settings win");
+            Check(!b.Merge(a).Changed && b.EffectiveSettings.AutoLockMinutes == 30, "the copy with the later settings keeps them");
+            Check(a.ContentEquals(b), "both copies end up the same");
+
+            // Случайные правки в двух копиях: с какой стороны ни объединяй, итог один.
+            var random = new Random(20261115);
+            for (int round = 0; round < 40; round++)
+            {
+                VaultData first = VaultData.CreateEmpty();
+                Group g1 = first.AddGroup("Группа 1");
+                Group g2 = first.AddGroup("Группа 2");
+                var ids = new List<string>();
+                for (int i = 0; i < 6; i++)
+                {
+                    Entry entry = first.AddEntry(i % 2 == 0 ? g1.Id : null, "login" + i, "password" + i, "Запись " + i);
+                    Touch(entry, "2026-01-01T00:00:00Z");
+                    ids.Add(entry.Id);
+                }
+                g1.Changed = g2.Changed = "2026-01-01T00:00:00Z";
+                VaultData second = CopyOf(first);
+
+                foreach (VaultData copy in new[] { first, second })
+                {
+                    for (int step = 0; step < 5; step++)
+                    {
+                        string id = ids[random.Next(ids.Count)];
+                        Entry entry = copy.FindEntry(id);
+                        string when = "2026-02-" + (1 + random.Next(20)).ToString("00") + "T00:00:0" + random.Next(10) + "Z";
+                        int action = random.Next(5);
+                        if (entry == null)
+                        {
+                            Entry added = copy.AddEntry(null, "new", "new" + random.Next(1000), "Новая " + random.Next(1000));
+                            Touch(added, when);
+                        }
+                        else if (action == 0)
+                        {
+                            copy.UpdateEntry(id, entry.GroupId, entry.Login, "changed" + random.Next(1000), entry.Description);
+                            Touch(entry, when);
+                        }
+                        else if (action == 1)
+                        {
+                            bool toGroup = random.Next(2) == 0 && copy.FindGroup(g2.Id) != null;
+                            copy.MoveEntries(new[] { id }, toGroup ? g2.Id : null);
+                            entry.Changed = when;
+                        }
+                        else if (action == 2)
+                        {
+                            copy.TrashEntries(new[] { id });
+                            entry.Changed = when;
+                        }
+                        else if (action == 3)
+                        {
+                            copy.DeleteEntries(new[] { id });
+                            foreach (Tombstone tombstone in copy.Removed)
+                            {
+                                if (tombstone.Id == id) tombstone.When = when;
+                            }
+                        }
+                        else if (copy.FindGroup(g2.Id) != null && random.Next(3) == 0)
+                        {
+                            copy.DeleteGroup(g2.Id);
+                            foreach (Tombstone tombstone in copy.Removed)
+                            {
+                                if (tombstone.Id == g2.Id) tombstone.When = when;
+                            }
+                        }
+                    }
+                }
+                MergeBothWays(first, second, "random edits, round " + round);
+            }
+        }
+
+        // ---------- Один файл, открытый в двух местах ----------
+
+        private static int foreignWrites;
+
+        /// <summary>Записывает файл «со стороны» — как это сделала бы другая программа или облачная папка.</summary>
+        private static void WriteForeign(string path, byte[] content)
+        {
+            File.WriteAllBytes(path, content);
+            // Время изменения заведомо отличается от прежнего, даже если записи идут подряд.
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(++foreignWrites));
+        }
+
+        private static void SharedFileMerge()
+        {
+            string path = NewVaultPath("shared");
+            using (VaultSession first = VaultSession.Create(path, Password, FastIterations))
+            using (VaultSession second = VaultSession.Open(path, Password))
+            {
+                Check(first.TakeMerge() == null && second.TakeMerge() == null, "nothing is merged while the file is only ours");
+                Check(!first.Reload() && !second.Reload(), "an unchanged file is not read again");
+
+                // Оба «компьютера» добавляют по записи; второй сохраняет позже и не должен затереть первую.
+                Entry a = first.Data.AddEntry(null, "a", "pa", "С первого компьютера");
+                first.Save();
+                Check(first.TakeMerge() == null, "saving over our own file merges nothing");
+
+                Entry b = second.Data.AddEntry(null, "b", "pb", "Со второго компьютера");
+                second.Save();
+                MergeResult merged = second.TakeMerge();
+                Check(merged != null && merged.EntriesAdded == 1 && second.Data.Entries.Count == 2 && second.Data.FindEntry(a.Id) != null,
+                    "the second copy picks up the entry of the first one when it saves");
+                Check(second.TakeMerge() == null, "the result is handed out once");
+                using (VaultSession file = VaultSession.Open(path, Password))
+                {
+                    Check(file.Data.Entries.Count == 2, "the file holds the entries of both");
+                }
+
+                // Первая копия узнаёт о чужой записи при проверке файла — и ничего не пишет: в файле уже всё есть.
+                byte[] before = File.ReadAllBytes(path);
+                Check(first.Reload(), "the first copy notices the changed file");
+                merged = first.TakeMerge();
+                Check(merged != null && merged.EntriesAdded == 1 && first.Data.FindEntry(b.Id) != null, "and picks up the entry of the second one");
+                Equal(before, File.ReadAllBytes(path));
+                Check(!first.Reload() && first.TakeMerge() == null, "a second look finds nothing new");
+                Check(first.Data.ContentEquals(second.Data), "both copies hold the same");
+
+                // Удаление тоже доходит до другой копии.
+                first.Data.TrashEntries(new[] { b.Id });
+                first.Data.DeleteEntries(new[] { b.Id });
+                first.Save();
+                Check(second.Reload(), "the deletion is noticed");
+                merged = second.TakeMerge();
+                Check(merged.EntriesRemoved == 1 && second.Data.FindEntry(b.Id) == null && second.Data.Entries.Count == 1,
+                    "an entry deleted in one copy is gone in the other");
+
+                // Одна запись изменена в обеих копиях: остаётся поздняя правка, пароль ранней уходит в историю.
+                first.Data.UpdateEntry(a.Id, null, "a", "password-of-first", "С первого компьютера");
+                Touch(first.Data.FindEntry(a.Id), "2026-03-01T10:00:00Z");
+                first.Save();
+                second.Data.UpdateEntry(a.Id, null, "a-renamed", "password-of-second", "С первого компьютера");
+                Touch(second.Data.FindEntry(a.Id), "2026-03-01T11:00:00Z");
+                second.Save();
+                Check(first.Reload(), "the later edit is noticed");
+                Entry result = first.Data.FindEntry(a.Id);
+                Check(result.Login == "a-renamed" && result.Password == "password-of-second", "the later edit wins in both copies");
+                bool kept = false;
+                foreach (PasswordRecord record in result.History) kept |= record.Password == "password-of-first";
+                Check(kept, "the password of the earlier edit is kept in the history");
+                Check(first.Data.ContentEquals(second.Data), "both copies hold the same again");
+
+                // Несколько объединений подряд складываются в один итог.
+                second.Data.AddEntry(null, "c", "pc", "Третья");
+                second.Save();
+                first.Reload();
+                second.Data.AddEntry(null, "d", "pd", "Четвёртая");
+                second.Save();
+                first.Reload();
+                merged = first.TakeMerge();
+                Check(merged.EntriesAdded == 2 && merged.EntriesUpdated == 1, "results add up until they are taken: " + merged.Describe());
+            }
+        }
+
+        private static void SharedFileReload()
+        {
+            string path = NewVaultPath("reload");
+            using (VaultSession first = VaultSession.Create(path, Password, FastIterations))
+            using (VaultSession second = VaultSession.Open(path, Password))
+            {
+                // У второй копии есть запись, которой нет в файле: облако оставило чужую версию вместо её собственной.
+                Entry mine = second.Data.AddEntry(null, "second", "p2", "Есть только в памяти");
+                Entry theirs = first.Data.AddEntry(null, "first", "p1", "Записана первой копией");
+                first.Save();
+
+                Check(second.Reload(), "the changed file is noticed");
+                Check(second.Data.Entries.Count == 2 && !second.HasUnwrittenChanges, "the copy merges the file and writes back what it lacked");
+                using (VaultSession file = VaultSession.Open(path, Password))
+                {
+                    Check(file.Data.FindEntry(mine.Id) != null && file.Data.FindEntry(theirs.Id) != null, "the file now holds both entries");
+                }
+
+                // Первая копия подхватывает это и ничего больше не пишет: копии сошлись.
+                byte[] settled = File.ReadAllBytes(path);
+                Check(first.Reload() && first.Data.ContentEquals(second.Data), "the first copy catches up");
+                Check(!second.Reload() && !first.Reload(), "then both stay quiet");
+                Equal(settled, File.ReadAllBytes(path));
+
+                // Упрямый сосед раз за разом возвращает в файл старую версию. Копия дописывает файл,
+                // но не без конца: после нескольких попыток она ждёт обычного сохранения.
+                byte[] stale = File.ReadAllBytes(path);
+                Entry extra = second.Data.AddEntry(null, "extra", "p3", "Ещё одна запись");
+                second.Save();
+                int rewritten = 0;
+                for (int round = 0; round < 6; round++)
+                {
+                    WriteForeign(path, stale);
+                    second.Reload();
+                    if (!SameBytes(stale, File.ReadAllBytes(path))) rewritten++;
+                }
+                Check(rewritten == 3, "the file is rewritten a limited number of times: " + rewritten);
+                Check(second.HasUnwrittenChanges, "after that the copy remembers that the file lacks its changes");
+                second.Save();
+                Check(!second.HasUnwrittenChanges, "an ordinary save writes them");
+                using (VaultSession file = VaultSession.Open(path, Password))
+                {
+                    Check(file.Data.FindEntry(extra.Id) != null, "and the entry is in the file");
+                }
+            }
+        }
+
+        private static void SharedFileConflict()
+        {
+            const string newPassword = "пароль, сменённый в другом месте";
+            string path = NewVaultPath("conflict");
+            string copyPath;
+            Entry late;
+
+            using (VaultSession first = VaultSession.Create(path, Password, FastIterations))
+            using (VaultSession second = VaultSession.Open(path, Password))
+            {
+                first.Data.AddEntry(null, "common", "p0", "Общая запись");
+                first.Save();
+                second.Reload();
+
+                // Копия того же хранилища читается тем же ключом — пароль не нужен.
+                string twin = path + ".twin";
+                File.Copy(path, twin);
+                VaultData same = second.ReadCopy(twin);
+                Check(same != null && same.Entries.Count == 1, "a copy of the same vault is read with the key of the session");
+
+                // В другом месте сменили мастер-пароль: файл перешифрован.
+                first.ChangePassword(newPassword);
+                byte[] rekeyed = File.ReadAllBytes(path);
+
+                late = second.Data.AddEntry(null, "late", "p1", "Добавлена после смены пароля");
+                ExpectVaultError(VaultError.Conflict, delegate { second.Save(); });
+                ExpectVaultError(VaultError.Conflict, delegate { second.Reload(); });
+                Equal(rekeyed, File.ReadAllBytes(path));
+
+                // Несохранённое уходит в отдельный файл рядом, который открывается прежним паролем.
+                copyPath = second.SaveConflictCopy(null);
+                Check(copyPath != path && File.Exists(copyPath) && Path.GetFileName(copyPath).Contains(".conflict-") && copyPath.EndsWith(".vault"),
+                    "conflict copy: " + Path.GetFileName(copyPath));
+                Check(Path.GetDirectoryName(copyPath) == Path.GetDirectoryName(path), "the copy lies next to the vault");
+                string another = second.SaveConflictCopy(null);
+                Check(another != copyPath && File.Exists(another), "one more copy does not overwrite the first: " + Path.GetFileName(another));
+                Equal(rekeyed, File.ReadAllBytes(path));
+                Check(first.ReadCopy(copyPath) == null, "the copy is encrypted with the previous key: it needs its own password");
+            }
+
+            ExpectVaultError(VaultError.WrongPassword, delegate { VaultSession.Open(copyPath, newPassword); });
+            using (VaultSession current = VaultSession.Open(path, newPassword))
+            using (VaultSession copy = VaultSession.Open(copyPath, Password))
+            {
+                Check(current.Data.FindEntry(late.Id) == null, "the vault itself lacks the late entry");
+                MergeResult merged = current.Data.Merge(copy.Data);
+                Check(merged.EntriesAdded == 1 && current.Data.FindEntry(late.Id) != null, "merging the copy brings it back");
+                current.Save();
+            }
+
+            // Смена пароля сначала вливает то, что успели записать в другом месте.
+            string rekeyPath = NewVaultPath("rekey");
+            using (VaultSession first = VaultSession.Create(rekeyPath, Password, FastIterations))
+            using (VaultSession second = VaultSession.Open(rekeyPath, Password))
+            {
+                Entry fromSecond = second.Data.AddEntry(null, "s", "p", "Записана перед самой сменой пароля");
+                second.Save();
+                first.ChangePassword(newPassword);
+                MergeResult merged = first.TakeMerge();
+                Check(first.Data.FindEntry(fromSecond.Id) != null && merged != null && merged.EntriesAdded == 1, "changing the password merges the file first");
+            }
+            using (VaultSession file = VaultSession.Open(rekeyPath, newPassword))
+            {
+                Check(file.Data.Entries.Count == 1, "nothing is lost when the password changes");
+            }
+
+            // Файл записала более новая версия программы: прочитать его нельзя, затирать — тоже.
+            string newerPath = NewVaultPath("newer");
+            using (VaultSession session = VaultSession.Create(newerPath, Password, FastIterations))
+            {
+                byte[] own = File.ReadAllBytes(newerPath);
+                VaultHeader header = VaultFormat.ParseHeader(own);
+                session.Data.AddEntry(null, "x", "y", "Не должна затереть чужой файл");
+
+                byte[] newerFormat = (byte[])own.Clone();
+                newerFormat[6] = 9;
+                WriteForeign(newerPath, newerFormat);
+                ExpectVaultError(VaultError.Conflict, delegate { session.Save(); });
+                ExpectVaultError(VaultError.Conflict, delegate { session.Reload(); });
+                Equal(newerFormat, File.ReadAllBytes(newerPath));
+
+                byte[] key = VaultFormat.DeriveKey(Password, header.Salt, header.Iterations);
+                byte[] newerData = VaultFormat.Seal(key, header.Salt, header.Iterations, Encoding.UTF8.GetBytes("{\"version\":99,\"groups\":[],\"entries\":[]}"));
+                WriteForeign(newerPath, newerData);
+                ExpectVaultError(VaultError.Conflict, delegate { session.Save(); });
+                Equal(newerData, File.ReadAllBytes(newerPath));
+            }
+
+            // Испорченный или недописанный файл беречь незачем: проверка его пропускает, сохранение — заменяет.
+            string damagedPath = NewVaultPath("damaged");
+            using (VaultSession session = VaultSession.Create(damagedPath, Password, FastIterations))
+            {
+                Entry kept = session.Data.AddEntry(null, "k", "v", "Уцелевшая запись");
+                session.Save();
+                byte[] good = File.ReadAllBytes(damagedPath);
+
+                byte[] cut = Slice(good, 0, good.Length - 7);
+                WriteForeign(damagedPath, cut);
+                Check(!session.Reload() && session.TakeMerge() == null, "a truncated file is not merged");
+                Equal(cut, File.ReadAllBytes(damagedPath));
+                session.Save();
+                using (VaultSession file = VaultSession.Open(damagedPath, Password))
+                {
+                    Check(file.Data.FindEntry(kept.Id) != null, "saving replaces the damaged file");
+                }
+
+                WriteForeign(damagedPath, Ascii("not a vault at all"));
+                Check(!session.Reload(), "a foreign file is not merged either");
+                session.Save();
+                VaultSession.Open(damagedPath, Password).Dispose();
+
+                File.Delete(damagedPath);
+                Check(!session.Reload(), "a missing file is nothing to merge");
+                session.Save();
+                Check(File.Exists(damagedPath), "saving recreates a deleted file");
+            }
         }
 
         // ---------- Импорт и экспорт ----------

@@ -147,6 +147,7 @@ namespace KeyBox.Tests
             Run("unlock: wrong password, then the right one", Unlock);
             Run("change the master password", ChangeMasterPassword);
             Run("vault protection: key file as a second key", Protection);
+            Run("shared file: changes made elsewhere, merging, conflicts", SharedFile);
             Run("auto-lock also closes open dialogs", AutoLock);
             Run("english interface: every window, nothing left untranslated", EnglishInterface);
 
@@ -2486,6 +2487,288 @@ namespace KeyBox.Tests
             }
         }
 
+        /// <summary>
+        /// Один файл хранилища, открытый в двух местах. «Другой компьютер» — вторая сессия на том же
+        /// файле. Автопроверка файла на время сценария выключена: тест вызывает её сам, по шагам.
+        /// В конце хранилище возвращается к прежнему виду и прежнему паролю.
+        /// </summary>
+        private static void SharedFile()
+        {
+            const string foreignPassword = "пароль другого хранилища";
+            const string changedPassword = "пароль, сменённый в другом месте";
+            string copyPath = Path.Combine(workDir, "copy.vault");
+            string foreignPath = Path.Combine(workDir, "foreign.vault");
+            string textPath = Path.Combine(workDir, "not-a-vault.vault");
+            DeleteSharedFiles(copyPath, foreignPath, textPath);
+
+            int entriesBefore = session.Data.Entries.Count;
+            int groupsBefore = session.Data.Groups.Count;
+            string picked = copyPath;
+            Ui.FilePicker = delegate(bool save, string suggested) { return picked; };
+            main.FileCheckSeconds = 0;
+            try
+            {
+                SelectGroup("Все записи");
+
+                // --- Запись, добавленная в другом месте, появляется после проверки файла.
+                using (VaultSession other = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    other.Data.AddEntry(null, "remote", "remote-pass-1", "С другого компьютера");
+                    other.Save();
+                }
+                Check(!HasTitle("С другого компьютера"), "the entry is not in the list before the file is checked");
+                main.CheckFile();
+                Pump(50);
+                Check(HasTitle("С другого компьютера") && session.Data.Entries.Count == entriesBefore + 1, "the entry appears after the check");
+                Check(StatusText("lblMessage") == "Файл изменён в другом месте — подхвачено: записей добавлено: 1", "status: " + StatusText("lblMessage"));
+                Check(StatusText("lblCount").Contains((entriesBefore + 1).ToString()), "the counter follows: " + StatusText("lblCount"));
+                Shot(main, "37-picked-up");
+                main.CheckFile();
+                Check(session.TakeMerge() == null, "a second check finds nothing new");
+
+                // --- Пока открыт диалог, список под руками не меняется; чужие изменения вливаются при сохранении.
+                Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+                {
+                    using (VaultSession other = VaultSession.Open(vaultPath, NewMasterPassword))
+                    {
+                        other.Data.AddEntry(null, "remote2", "remote-pass-2", "Пока был открыт диалог");
+                        other.Save();
+                    }
+                    main.CheckFile();
+                    Check(session.Data.Entries.Count == entriesBefore + 1, "nothing is merged while a dialog is open");
+
+                    Find<TextBox>(f, "txtDescription").Text = "Своя запись";
+                    Find<TextBox>(f, "txtLogin").Text = "local";
+                    Find<TextBox>(f, "txtPassword").Text = "local-pass-1";
+                    Click(f, "btnOk");
+                });
+                Check(HasTitle("Своя запись") && HasTitle("Пока был открыт диалог"), "saving merges what was written elsewhere in the meantime");
+                using (VaultSession file = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    Check(file.Data.Entries.Count == entriesBefore + 3, "the file holds the entries of both sides: " + file.Data.Entries.Count);
+                }
+                WaitUntil(delegate { return StatusText("lblMessage").Contains("подхвачено: записей добавлено: 1"); }, 4000, "the note about the merge");
+
+                // --- Таймер делает ту же проверку сам.
+                using (VaultSession other = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    string remoteId = null;
+                    foreach (Entry entry in other.Data.Entries)
+                    {
+                        if (entry.Description == "С другого компьютера") remoteId = entry.Id;
+                    }
+                    other.Data.TrashEntries(new[] { remoteId });
+                    other.Data.DeleteEntries(new[] { remoteId });
+                    other.Save();
+                }
+                main.FileCheckSeconds = 1;
+                WaitUntil(delegate { return !HasTitle("С другого компьютера"); }, 8000, "the timer to notice the changed file");
+                main.FileCheckSeconds = 0;
+                Check(StatusText("lblMessage").Contains("записей удалено: 1"), "status: " + StatusText("lblMessage"));
+
+                // --- «Объединить с файлом…». Копия того же хранилища открывается без пароля.
+                var more = (ToolStripDropDownButton)Tool("toolbar", "btnMore");
+                Check(more.DropDownItems.Find("miMerge", false).Length == 1, "the menu has the merge command");
+                File.Copy(vaultPath, copyPath, true);
+                using (VaultSession copy = VaultSession.Open(copyPath, NewMasterPassword))
+                {
+                    copy.Data.AddEntry(null, "copy", "copy-pass-1", "Из копии");
+                    copy.Save();
+                }
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    Check(box.Text == "Объединение" && text == "Объединено с файлом «copy.vault»: записей добавлено: 1.", "the result: " + text);
+                    Shot(box, "38-merged-with-file");
+                    Click(box, "btnOk");
+                });
+                Check(HasTitle("Из копии"), "the entry from the copy is in the list");
+                using (VaultSession file = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    Check(file.Data.Entries.Count == entriesBefore + 3, "and in the file: " + file.Data.Entries.Count);
+                }
+
+                // Повторное объединение ничего нового не находит.
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("нет ничего нового"), "merging again: " + Find<Label>(box, "lblText").Text);
+                    Click(box, "btnOk");
+                });
+
+                // Сам открытый файл, не хранилище вовсе, отмена выбора.
+                picked = vaultPath;
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("тот самый файл"), "the open file itself: " + Find<Label>(box, "lblText").Text);
+                    Click(box, "btnOk");
+                });
+                File.WriteAllText(textPath, "просто текст, не хранилище");
+                picked = textPath;
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("не является хранилищем"), "a foreign file: " + Find<Label>(box, "lblText").Text);
+                    Click(box, "btnOk");
+                });
+                picked = null;
+                ClickTool("toolbar", "miMerge");
+                Check(session.Data.Entries.Count == entriesBefore + 3, "cancelling the file choice does nothing");
+
+                // --- Другое хранилище со своим паролем: окно спрашивает его.
+                using (VaultSession foreign = VaultSession.Create(foreignPath, foreignPassword, VaultFormat.MinIterations))
+                {
+                    Group group = foreign.Data.AddGroup("Из другого хранилища");
+                    foreign.Data.AddEntry(group.Id, "foreign", "foreign-pass-1", "Чужая запись");
+                    foreign.Save();
+                }
+                picked = foreignPath;
+                Drive<MsgBox>(delegate
+                {
+                    Drive<UnlockForm>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(UnlockForm f)
+                    {
+                        Label error = Find<Label>(f, "lblError");
+                        Check(Find<Label>(f, "lblSubtitle").Text.Contains("Другой файл хранилища"), "the window says which password it wants: " + Find<Label>(f, "lblSubtitle").Text);
+                        Check(Find<Button>(f, "btnCancel").Text == "Отмена" && !f.ShowInTaskbar && Find<Button>(f, "btnOk").Text == "Открыть", "it is an ordinary dialog");
+
+                        Find<TextBox>(f, "txtPassword").Text = NewMasterPassword;
+                        Click(f, "btnOk");
+                        WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
+                        Check(f.Visible && error.Visible && error.Text.Contains("Неверный"), "the password of the open vault does not fit: " + error.Text);
+                        Shot(f, "39-merge-password");
+
+                        Find<TextBox>(f, "txtPassword").Text = foreignPassword;
+                        Click(f, "btnOk");
+                        WaitDecided(f, 20000, "the other vault to open");
+                    });
+                }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    Check(text.Contains("foreign.vault") && text.Contains("записей добавлено: 1") && text.Contains("изменений в группах: 1"), "the result: " + text);
+                    Click(box, "btnOk");
+                });
+                Check(HasGroup("Из другого хранилища") && FindEntry("Чужая запись") != null && FindEntry("Чужая запись").GroupId == GroupId("Из другого хранилища"),
+                    "the group and its entry come over together");
+
+                // --- В другом месте сменили мастер-пароль. Записать в файл уже нельзя: новая запись
+                // уходит в отдельный файл, а хранилище блокируется.
+                using (VaultSession other = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    other.ChangePassword(changedPassword);
+                }
+                string rekeyed = Convert.ToBase64String(File.ReadAllBytes(vaultPath));
+                MainForm window = main;
+                Drive<MsgBox>(delegate { AddEntry("Отложенная запись", "late", "late-pass-1", null); }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    Check(box.Text == "Хранилище изменено в другом месте" && text.Contains("сменили мастер-пароль") && text.Contains(".conflict-") &&
+                          text.Contains("прежним паролем") && text.Contains("заблокируется"), "the conflict is explained: " + text);
+                    Shot(box, "40-conflict");
+                    Click(box, "btnOk");
+                });
+                WaitUntil(delegate { return window.IsDisposed; }, 5000, "the window to close");
+                Check(window.LockRequested, "the vault is locked");
+                Check(Convert.ToBase64String(File.ReadAllBytes(vaultPath)) == rekeyed, "the vault file is not overwritten");
+                string[] copies = Directory.GetFiles(workDir, "*.conflict-*");
+                Check(copies.Length == 1, "one file is set aside: " + copies.Length);
+                using (VaultSession aside = VaultSession.Open(copies[0], NewMasterPassword))
+                {
+                    bool found = false;
+                    foreach (Entry entry in aside.Data.Entries) found |= entry.Description == "Отложенная запись";
+                    Check(found, "it opens with the previous password and holds the unsaved entry");
+                }
+
+                // Хранилище открывается новым паролем; отложенный файл вливается обратно — у него свой пароль.
+                ReopenAfterConflict(changedPassword);
+                Check(FindEntry("Отложенная запись") == null, "the vault itself lacks the entry");
+                picked = copies[0];
+                Drive<MsgBox>(delegate
+                {
+                    Drive<UnlockForm>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(UnlockForm f)
+                    {
+                        Find<TextBox>(f, "txtPassword").Text = NewMasterPassword;
+                        Click(f, "btnOk");
+                        WaitDecided(f, 20000, "the file set aside to open");
+                    });
+                }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("записей добавлено: 1"), "the result: " + Find<Label>(box, "lblText").Text);
+                    Click(box, "btnOk");
+                });
+                Check(HasTitle("Отложенная запись"), "the entry is back in the vault");
+
+                // --- То же без несохранённых изменений: откладывать нечего, хранилище просто блокируется.
+                using (VaultSession other = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    other.ChangePassword(changedPassword);
+                }
+                window = main;
+                Drive<MsgBox>(delegate { window.CheckFile(); }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    Check(text.Contains("сменили мастер-пароль") && !text.Contains(".conflict-") && text.Contains("заблокируется"), "nothing to set aside: " + text);
+                    Click(box, "btnOk");
+                });
+                WaitUntil(delegate { return window.IsDisposed; }, 5000, "the window to close");
+                Check(window.LockRequested && Directory.GetFiles(workDir, "*.conflict-*").Length == 1, "locked, and no new file appears");
+                ReopenAfterConflict(changedPassword);
+
+                // --- Убираем за собой.
+                var added = new List<string>();
+                foreach (string title in new[] { "Своя запись", "Пока был открыт диалог", "Из копии", "Чужая запись", "Отложенная запись" })
+                {
+                    Entry entry = FindEntry(title);
+                    Check(entry != null, "the entry is in the vault: " + title);
+                    added.Add(entry.Id);
+                }
+                session.Data.TrashEntries(added);
+                session.Data.DeleteEntries(added);
+                session.Data.DeleteGroup(GroupId("Из другого хранилища"));
+                session.Save();
+                InvokeMain("RefreshAll");
+                Check(session.Data.Entries.Count == entriesBefore && session.Data.Groups.Count == groupsBefore, "the vault is back to its previous shape");
+                using (VaultSession file = VaultSession.Open(vaultPath, NewMasterPassword))
+                {
+                    Check(file.Data.Entries.Count == entriesBefore && file.Data.Groups.Count == groupsBefore, "and so is the file");
+                }
+            }
+            finally
+            {
+                Ui.FilePicker = null;
+                if (main != null && !main.IsDisposed) main.FileCheckSeconds = MainForm.DefaultFileCheckSeconds;
+                DeleteSharedFiles(copyPath, foreignPath, textPath);
+            }
+        }
+
+        /// <summary>После конфликта: хранилище открывается паролем, заданным «в другом месте», и возвращается к прежнему.</summary>
+        private static void ReopenAfterConflict(string currentPassword)
+        {
+            if (session != null) session.Dispose();
+            session = VaultSession.Open(vaultPath, currentPassword);
+            session.ChangePassword(NewMasterPassword);
+            OpenMain();
+            main.FileCheckSeconds = 0;
+            SelectGroup("Все записи");
+        }
+
+        private static void DeleteSharedFiles(params string[] files)
+        {
+            foreach (string file in files)
+            {
+                foreach (string path in new[] { file, file + ".bak", file + ".tmp" })
+                {
+                    if (File.Exists(path)) File.Delete(path);
+                }
+            }
+            foreach (string path in Directory.GetFiles(workDir, "*.conflict-*"))
+            {
+                File.Delete(path);
+            }
+        }
+
+        private static bool HasTitle(string title)
+        {
+            return Array.IndexOf(Titles(), title) >= 0;
+        }
+
         private static void AutoLock()
         {
             MainForm window = main;
@@ -2670,6 +2953,58 @@ namespace KeyBox.Tests
                     Check(Find<Label>(box, "lblText").Text.Contains("will not be encrypted"), "the export warning: " + Find<Label>(box, "lblText").Text);
                     Click(box, "btnCancel");
                 });
+
+                // Изменение, сделанное в другом месте, и объединение с файлом, у которого свой пароль.
+                main.FileCheckSeconds = 0;
+                using (VaultSession other = VaultSession.Open(path, password))
+                {
+                    other.Data.AddEntry(null, "remote", "remote-pass-1", "Added elsewhere");
+                    other.Save();
+                }
+                main.CheckFile();
+                Pump(50);
+                Check(StatusText("lblMessage") == "The file was changed elsewhere — picked up: entries added: 1", "status: " + StatusText("lblMessage"));
+                CheckEnglish(main);
+
+                string otherPath = Path.Combine(workDir, "other-" + EnglishVaultName);
+                foreach (string file in new[] { otherPath, otherPath + ".bak" })
+                {
+                    if (File.Exists(file)) File.Delete(file);
+                }
+                using (VaultSession other = VaultSession.Create(otherPath, "another password", VaultFormat.MinIterations))
+                {
+                    other.Data.AddEntry(null, "other", "other-pass-1", "From another vault");
+                    other.Save();
+                }
+                Ui.FilePicker = delegate(bool save, string suggested) { return otherPath; };
+                try
+                {
+                    Drive<MsgBox>(delegate
+                    {
+                        Drive<UnlockForm>(delegate { ClickTool("toolbar", "miMerge"); }, delegate(UnlockForm f)
+                        {
+                            Check(Find<Label>(f, "lblSubtitle").Text == "Another vault file: its password is needed", "subtitle: " + Find<Label>(f, "lblSubtitle").Text);
+                            CheckEnglish(f);
+                            Find<TextBox>(f, "txtPassword").Text = "another password";
+                            Click(f, "btnOk");
+                            WaitDecided(f, 20000, "the other vault to open");
+                        });
+                    }, delegate(MsgBox box)
+                    {
+                        string text = Find<Label>(box, "lblText").Text;
+                        CheckEnglish(box);
+                        Check(box.Text == "Merge" && text.StartsWith("Merged with the file") && text.EndsWith(": entries added: 1."), "the result: " + text);
+                        Click(box, "btnOk");
+                    });
+                }
+                finally
+                {
+                    Ui.FilePicker = null;
+                    foreach (string file in new[] { otherPath, otherPath + ".bak" })
+                    {
+                        if (File.Exists(file)) File.Delete(file);
+                    }
+                }
 
                 // Меню «переместить» и сообщение о перемещении.
                 SelectGroup("All entries");
