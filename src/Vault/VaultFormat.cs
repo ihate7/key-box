@@ -121,7 +121,7 @@ namespace KeyBox.Vault
         /// <summary>Шифрует данные и собирает файл хранилища целиком.</summary>
         public static byte[] Seal(byte[] key, byte[] salt, int iterations, byte[] plaintext)
         {
-            if (salt == null || salt.Length != SaltSize) throw new ArgumentException("Неверный размер соли.", "salt");
+            if (salt == null || salt.Length != SaltSize) throw new ArgumentException("Invalid salt size.", "salt");
             if (iterations < MinIterations || iterations > MaxIterations) throw new ArgumentOutOfRangeException("iterations");
 
             byte[] nonce = Cng.RandomBytes(Cng.NonceSize);
@@ -162,14 +162,14 @@ namespace KeyBox.Vault
             if (version > FormatVersion)
             {
                 throw new VaultException(VaultError.UnsupportedVersion,
-                    "Хранилище создано более новой версией KeyBox. Обновите программу.");
+                    L.T("Хранилище создано более новой версией KeyBox. Обновите программу.", "The vault was created by a newer version of KeyBox. Update the program."));
             }
             if (version != FormatVersion) throw NotAVault();
 
             if (file[8] != KdfPbkdf2Sha512 || file[9] != CipherAes256Gcm)
             {
                 throw new VaultException(VaultError.UnsupportedVersion,
-                    "Хранилище зашифровано алгоритмом, который эта версия KeyBox не поддерживает.");
+                    L.T("Хранилище зашифровано алгоритмом, который эта версия KeyBox не поддерживает.", "The vault is encrypted with an algorithm that this version of KeyBox does not support."));
             }
 
             long iterations = (uint)(file[10] | (file[11] << 8) | (file[12] << 16) | (file[13] << 24));
@@ -199,7 +199,7 @@ namespace KeyBox.Vault
             if (!Cng.AesGcmDecrypt(key, header.Nonce, ciphertext, associatedData, tag, out plaintext))
             {
                 throw new VaultException(VaultError.WrongPassword,
-                    "Неверный мастер-пароль или файл хранилища повреждён.");
+                    L.T("Неверный мастер-пароль или файл хранилища повреждён.", "Wrong master password, or the vault file is damaged."));
             }
             return plaintext;
         }
@@ -207,7 +207,7 @@ namespace KeyBox.Vault
         private static VaultException NotAVault()
         {
             return new VaultException(VaultError.BadFormat,
-                "Файл не является хранилищем KeyBox или повреждён.");
+                L.T("Файл не является хранилищем KeyBox или повреждён.", "The file is not a KeyBox vault, or it is damaged."));
         }
 
         private static byte[] Slice(byte[] source, int offset, int count)

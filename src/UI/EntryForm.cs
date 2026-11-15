@@ -36,7 +36,7 @@ namespace KeyBox.UI
         /// <param name="entry">Изменяемая запись или null для новой.</param>
         /// <param name="groupId">Группа, выбранная изначально (null — без группы).</param>
         public EntryForm(VaultData data, Entry entry, string groupId)
-            : base(entry == null ? "Новая запись" : "Изменение записи", 540)
+            : base(entry == null ? L.T("Новая запись", "New entry") : L.T("Изменение записи", "Edit entry"), 540)
         {
             Name = "EntryForm";
 
@@ -56,7 +56,7 @@ namespace KeyBox.UI
             txtDescription.Height = Ui.Font.Height * 3 + Ui.S(10);
             txtDescription.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             txtDescription.Margin = new Padding(0, 0, 0, gap);
-            AddRow("Описание", txtDescription, true);
+            AddRow(L.T("Описание", "Description"), txtDescription, true);
 
             // Логин
             txtLogin = new TextBox();
@@ -64,7 +64,7 @@ namespace KeyBox.UI
             txtLogin.MaxLength = VaultData.MaxLoginLength;
             txtLogin.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             txtLogin.Margin = new Padding(0, 0, 0, gap);
-            AddRow("Логин", txtLogin, false);
+            AddRow(L.T("Логин", "Username"), txtLogin, false);
 
             // Пароль: поле, «показать», «сгенерировать»
             var passwordRow = new TableLayoutPanel();
@@ -89,7 +89,7 @@ namespace KeyBox.UI
             chkShow.Name = "chkShow";
             chkShow.CheckedChanged += OnShowChanged;
 
-            btnGenerate = Ui.MakeButton("Сгенерировать");
+            btnGenerate = Ui.MakeButton(L.T("Сгенерировать", "Generate"));
             btnGenerate.Name = "btnGenerate";
             btnGenerate.MinimumSize = new Size(0, txtPassword.PreferredHeight);
             btnGenerate.Margin = new Padding(Ui.S(6), 0, 0, 0);
@@ -98,7 +98,7 @@ namespace KeyBox.UI
             passwordRow.Controls.Add(txtPassword, 0, 0);
             passwordRow.Controls.Add(chkShow, 1, 0);
             passwordRow.Controls.Add(btnGenerate, 2, 0);
-            AddRow("Пароль", passwordRow, false);
+            AddRow(L.T("Пароль", "Password"), passwordRow, false);
 
             // Группа
             cmbGroup = new ComboBox();
@@ -113,7 +113,7 @@ namespace KeyBox.UI
             cmbGroup.Margin = Padding.Empty;
             cmbGroup.MaxDropDownItems = 16;
             FillGroups(data, groupId);
-            AddRow("Группа", cmbGroup, false);
+            AddRow(L.T("Группа", "Group"), cmbGroup, false);
 
             lblError = Ui.MakeErrorLabel(ContentWidth);
             lblError.Margin = new Padding(0, Ui.S(12), 0, 0);
@@ -121,8 +121,8 @@ namespace KeyBox.UI
             Body.SetColumnSpan(lblError, 2);
 
             var tips = new ToolTip();
-            tips.SetToolTip(chkShow, "Показать пароль");
-            tips.SetToolTip(btnGenerate, string.Format("Случайный пароль из {0} символов", PasswordGenerator.DefaultLength));
+            tips.SetToolTip(chkShow, L.T("Показать пароль", "Show password"));
+            tips.SetToolTip(btnGenerate, L.F("Случайный пароль из {0} символов", "Random password of {0} characters", PasswordGenerator.DefaultLength));
             Disposed += delegate { tips.Dispose(); };
 
             if (entry != null)
@@ -142,10 +142,10 @@ namespace KeyBox.UI
                 }
             }
 
-            Button ok = Ui.MakeButton(entry == null ? "Добавить" : "Сохранить");
+            Button ok = Ui.MakeButton(entry == null ? L.T("Добавить", "Add") : L.T("Сохранить", "Save"));
             ok.Name = "btnOk";
             ok.Click += OnOk;
-            Button cancel = Ui.MakeButton("Отмена");
+            Button cancel = Ui.MakeButton(L.T("Отмена", "Cancel"));
             cancel.Name = "btnCancel";
             cancel.DialogResult = DialogResult.Cancel;
             SetButtons(ok, cancel, false);
@@ -203,7 +203,7 @@ namespace KeyBox.UI
 
             var none = new GroupChoice();
             none.Id = null;
-            none.Name = "Без группы";
+            none.Name = L.T("Без группы", "No group");
             cmbGroup.Items.Add(none);
             cmbGroup.SelectedIndex = 0;
 
@@ -229,13 +229,13 @@ namespace KeyBox.UI
             if (!hasCreated && !hasModified) return null;
             if (hasCreated && (!hasModified || entry.Created == entry.Modified))
             {
-                return "Создано " + Ui.FormatTime(created);
+                return L.T("Создано ", "Created ") + L.FormatTime(created);
             }
             if (!hasCreated)
             {
-                return "Изменено " + Ui.FormatTime(modified);
+                return L.T("Изменено ", "Modified ") + L.FormatTime(modified);
             }
-            return "Создано " + Ui.FormatTime(created) + "  ·  изменено " + Ui.FormatTime(modified);
+            return L.T("Создано ", "Created ") + L.FormatTime(created) + L.T("  ·  изменено ", "  ·  modified ") + L.FormatTime(modified);
         }
 
         private void OnShowChanged(object sender, EventArgs e)

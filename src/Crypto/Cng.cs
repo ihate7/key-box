@@ -84,7 +84,7 @@ namespace KeyBox.Crypto
         {
             if (ciphertext == null) throw new ArgumentNullException("ciphertext");
             if (tag == null) throw new ArgumentNullException("tag");
-            if (tag.Length != TagSize) throw new ArgumentException("Неверный размер тега.", "tag");
+            if (tag.Length != TagSize) throw new ArgumentException("Invalid tag size.", "tag");
 
             byte[] output;
             int status = AesGcm(false, key, nonce, ciphertext, associatedData, (byte[])tag.Clone(), out output);
@@ -104,8 +104,8 @@ namespace KeyBox.Crypto
         {
             if (key == null) throw new ArgumentNullException("key");
             if (nonce == null) throw new ArgumentNullException("nonce");
-            if (key.Length != KeySize) throw new ArgumentException("Неверный размер ключа.", "key");
-            if (nonce.Length != NonceSize) throw new ArgumentException("Неверный размер nonce.", "nonce");
+            if (key.Length != KeySize) throw new ArgumentException("Invalid key size.", "key");
+            if (nonce.Length != NonceSize) throw new ArgumentException("Invalid nonce size.", "nonce");
 
             IntPtr algorithm = IntPtr.Zero;
             IntPtr keyHandle = IntPtr.Zero;
@@ -149,7 +149,7 @@ namespace KeyBox.Crypto
 
                 if (status == 0 && written != input.Length)
                 {
-                    throw new CryptographicException("AES-GCM вернул неожиданный размер данных.");
+                    throw new CryptographicException(L.T("AES-GCM вернул неожиданный размер данных.", "AES-GCM returned an unexpected data size."));
                 }
                 return status;
             }
@@ -168,7 +168,7 @@ namespace KeyBox.Crypto
             if (status != 0)
             {
                 throw new CryptographicException(
-                    string.Format("{0}: ошибка криптографии Windows 0x{1:X8}.", function, status));
+                    L.F("{0}: ошибка криптографии Windows 0x{1:X8}.", "{0}: Windows cryptography error 0x{1:X8}.", function, status));
             }
         }
 

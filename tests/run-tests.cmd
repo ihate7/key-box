@@ -23,7 +23,7 @@ set "FAILED=0"
 
 echo === Core tests ===
 "%CSC%" /nologo /noconfig /target:exe /platform:anycpu /optimize+ /warn:4 /codepage:65001 /utf8output %REFS% ^
-    /out:%OUT%\CoreTests.exe /recurse:src\Crypto\*.cs /recurse:src\Vault\*.cs tests\CoreTests.cs
+    /out:%OUT%\CoreTests.exe src\L.cs /recurse:src\Crypto\*.cs /recurse:src\Vault\*.cs tests\CoreTests.cs
 if errorlevel 1 exit /b 1
 
 rem An independent implementation of the file format (Node.js, standard crypto module only)

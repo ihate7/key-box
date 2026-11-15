@@ -31,6 +31,7 @@ namespace KeyBox.Tests
     {
         private const string MasterPassword = "верный мастер-пароль";
         private const string NewMasterPassword = "совсем другой пароль 2";
+        private const string EnglishVaultName = "english.vault";
 
         private static readonly string Mask = new string((char)0x2022, 8);
         private static readonly HashSet<Form> driven = new HashSet<Form>();
@@ -63,6 +64,9 @@ namespace KeyBox.Tests
                 Console.WriteLine("usage: UiTests <work-dir> [--visible]");
                 return 2;
             }
+
+            // Сценарий сверяет русские тексты окон, поэтому язык задаётся явно, а не берётся из системы.
+            L.Current = Language.Russian;
 
             workDir = Path.GetFullPath(args[0]);
             Directory.CreateDirectory(workDir);
@@ -131,6 +135,7 @@ namespace KeyBox.Tests
             Run("unlock: wrong password, then the right one", Unlock);
             Run("change the master password", ChangeMasterPassword);
             Run("auto-lock also closes open dialogs", AutoLock);
+            Run("english interface: every window, nothing left untranslated", EnglishInterface);
 
             if (main != null && !main.IsDisposed) main.Close();
             if (session != null) session.Dispose();
@@ -1472,6 +1477,173 @@ namespace KeyBox.Tests
             main = null;
         }
 
+        /// <summary>
+        /// Те же окна на английском языке. Отдельное хранилище с английскими данными: в его окнах
+        /// не должно остаться ни одной русской буквы — ни в подписях, ни в меню, ни в сообщениях.
+        /// </summary>
+        private static void EnglishInterface()
+        {
+            const string password = "correct horse battery staple";
+            string path = Path.Combine(workDir, EnglishVaultName);
+            foreach (string file in new[] { path, path + ".bak", path + ".tmp" })
+            {
+                if (File.Exists(file)) File.Delete(file);
+            }
+
+            VaultSession previousSession = session;
+            MainForm previousMain = main;
+            session = null;
+            main = null;
+            L.Current = Language.English;
+            try
+            {
+                using (var form = new UnlockForm(path))
+                {
+                    Drive<UnlockForm>(delegate { form.ShowDialog(); }, delegate(UnlockForm f)
+                    {
+                        Check(Find<Button>(f, "btnOk").Text == "Create vault", "caption of the create button: " + Find<Button>(f, "btnOk").Text);
+                        Click(f, "btnOk");
+                        Check(Find<Label>(f, "lblError").Text == "Enter the master password.", "validation message: " + Find<Label>(f, "lblError").Text);
+                        Find<TextBox>(f, "txtPassword").Text = "abc";
+                        CheckEnglish(f);
+                        Find<TextBox>(f, "txtPassword").Text = password;
+                        Find<TextBox>(f, "txtConfirm").Text = password;
+                        CheckEnglish(f);
+                        Shot(f, "en-01-create");
+                        Click(f, "btnOk");
+                        WaitDecided(f, 20000, "the vault to be created");
+                    });
+                    session = form.TakeSession();
+                }
+                Check(session != null, "the vault is created");
+
+                OpenMain();
+                SameList(new[] { "All entries", "No group" }, GroupNames(), "built-in rows of the tree");
+                CheckEnglish(main);
+
+                Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
+                {
+                    Check(box.Text == "New group", "dialog title: " + box.Text);
+                    Click(box, "btnOk");
+                    Check(Find<Label>(box, "lblError").Text == "Enter a group name.", "validation message: " + Find<Label>(box, "lblError").Text);
+                    CheckEnglish(box);
+                    Find<TextBox>(box, "txtName").Text = "Work";
+                    Click(box, "btnOk");
+                });
+                // Новая группа выбрана, поэтому следующая предлагается внутри неё.
+                Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
+                {
+                    Check(Find<ComboBox>(box, "cmbParent").SelectedItem.ToString() == "Work", "the new group goes inside the selected one");
+                    Find<TextBox>(box, "txtName").Text = "Servers";
+                    Click(box, "btnOk");
+                });
+
+                AddEnglishEntry("GitLab", "j.smith", "glpat-N8s2xQ4vT1", "Work");
+                AddEnglishEntry("Build server", "build", "Bu!ld-Srv-2026", "Work / Servers");
+                AddEnglishEntry("Mail\r\nPersonal mailbox", "john.smith@example.com", "Qw7!kPz#2026mail", "No group");
+
+                SelectGroup("All entries");
+                SelectEntries("GitLab");
+                Check(StatusText("lblCount") == "Entries: 3", "counter: " + StatusText("lblCount"));
+                SameList(new[] { "All entries", "Work", "> Servers", "No group" }, GroupNames(), "tree");
+                CheckEnglish(main);
+                Shot(main, "en-02-main");
+
+                Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+                {
+                    Check(f.Text == "Edit entry", "dialog title: " + f.Text);
+                    CheckEnglish(f);
+                    Shot(f, "en-03-entry");
+                    Click(f, "btnCancel");
+                });
+
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
+                {
+                    CheckEnglish(box);
+                    Check(Find<Label>(box, "lblText").Text.Contains("GitLab"), "the question names the entry");
+                    Click(box, "btnCancel");
+                });
+
+                SelectGroup("Work");
+                Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    CheckEnglish(box);
+                    Check(text.Contains("together with its subgroup") && text.Contains("2 entries will move to"), "group deletion is explained: " + text);
+                    Click(box, "btnCancel");
+                });
+
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miAbout"); }, delegate(MsgBox box)
+                {
+                    string text = Find<Label>(box, "lblText").Text;
+                    CheckEnglish(box);
+                    Check(text.Contains("2 groups") && text.Contains("3 entries"), "contents are counted: " + text);
+                    Click(box, "btnOk");
+                });
+
+                Drive<ChangePasswordForm>(delegate { main.ChangeMasterPassword(); }, delegate(ChangePasswordForm f)
+                {
+                    Click(f, "btnOk");
+                    Check(Find<Label>(f, "lblError").Text == "Enter the current master password.", "validation message: " + Find<Label>(f, "lblError").Text);
+                    CheckEnglish(f);
+                    Click(f, "btnCancel");
+                });
+
+                // Меню «переместить» и сообщение о перемещении.
+                SelectGroup("All entries");
+                SelectEntries("GitLab");
+                SameList(new[] { "Work", "Work / Servers", "-", "No group", "-", "New group…" }, MenuTexts(MoveMenu()), "move menu");
+                MenuItem(MoveMenu(), "No group").PerformClick();
+                Pump(30);
+                Check(StatusText("lblMessage").StartsWith("Moved to") && StatusText("lblMessage").EndsWith(": 1 entry"), "status: " + StatusText("lblMessage"));
+                CheckEnglish(main);
+
+                main.Close();
+                Pump(50);
+                main = null;
+                session.Dispose();
+                session = null;
+
+                // Вход в существующее хранилище: неверный пароль.
+                using (var form = new UnlockForm(path))
+                {
+                    Drive<UnlockForm>(delegate { form.ShowDialog(); }, delegate(UnlockForm f)
+                    {
+                        Label error = Find<Label>(f, "lblError");
+                        Check(Find<Button>(f, "btnOk").Text == "Open", "caption of the open button: " + Find<Button>(f, "btnOk").Text);
+                        Find<TextBox>(f, "txtPassword").Text = password + "?";
+                        Click(f, "btnOk");
+                        WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
+                        Check(error.Visible && error.Text.StartsWith("Wrong master password"), "wrong password is rejected: " + error.Text);
+                        CheckEnglish(f);
+                        Shot(f, "en-04-unlock");
+                        Click(f, "btnCancel");
+                    });
+                }
+            }
+            finally
+            {
+                L.Current = Language.Russian;
+                if (main != null && !main.IsDisposed) main.Close();
+                if (session != null) session.Dispose();
+                session = previousSession;
+                main = previousMain;
+            }
+        }
+
+        private static void AddEnglishEntry(string description, string login, string password, string group)
+        {
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+            {
+                Check(f.Text == "New entry", "dialog title: " + f.Text);
+                Find<TextBox>(f, "txtDescription").Text = description;
+                Find<TextBox>(f, "txtLogin").Text = login;
+                Find<TextBox>(f, "txtPassword").Text = password;
+                SelectCombo(Find<ComboBox>(f, "cmbGroup"), group);
+                Click(f, "btnOk");
+            });
+        }
+
         // =====================================================================
         //  Действия «как пользователь»
         // =====================================================================
@@ -2052,6 +2224,91 @@ namespace KeyBox.Tests
             {
                 throw new Exception(what + ": expected [" + string.Join(" | ", expected) + "], got [" + string.Join(" | ", actual) + "]");
             }
+        }
+
+        // ---------- Проверка перевода ----------
+
+        /// <summary>
+        /// В окне, его меню и списках не должно быть ни одной русской буквы. Строки с путём
+        /// к файлу хранилища не проверяются: папка, где идут тесты, может называться как угодно.
+        /// </summary>
+        private static void CheckEnglish(Form form)
+        {
+            var texts = new List<string>();
+            CollectTexts(form, texts);
+            Check(texts.Count >= 3, "texts of " + form.Name + " are collected: " + texts.Count);
+
+            foreach (string text in texts)
+            {
+                foreach (string line in text.Split('\n'))
+                {
+                    if (line.Contains(EnglishVaultName)) continue;
+                    foreach (char c in line)
+                    {
+                        if (c >= 0x0400 && c <= 0x04FF)
+                        {
+                            throw new Exception("russian text in the English interface of " + form.Name + ": " + line.Trim());
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void CollectTexts(Control control, List<string> texts)
+        {
+            AddText(texts, control.Text);
+            AddText(texts, control.AccessibleName);
+
+            var strip = control as ToolStrip;
+            if (strip != null) CollectItemTexts(strip.Items, texts);
+            if (control.ContextMenuStrip != null) CollectItemTexts(control.ContextMenuStrip.Items, texts);
+
+            var list = control as ListView;
+            if (list != null)
+            {
+                foreach (ColumnHeader column in list.Columns) AddText(texts, column.Text);
+                foreach (ListViewItem item in list.Items)
+                {
+                    foreach (ListViewItem.ListViewSubItem cell in item.SubItems) AddText(texts, cell.Text);
+                }
+            }
+
+            var tree = control as TreeView;
+            if (tree != null) CollectNodeTexts(tree.Nodes, texts);
+
+            var combo = control as ComboBox;
+            if (combo != null)
+            {
+                foreach (object item in combo.Items) AddText(texts, item.ToString());
+            }
+
+            foreach (Control child in control.Controls) CollectTexts(child, texts);
+        }
+
+        private static void CollectItemTexts(ToolStripItemCollection items, List<string> texts)
+        {
+            foreach (ToolStripItem item in items)
+            {
+                AddText(texts, item.Text);
+                AddText(texts, item.ToolTipText);
+                AddText(texts, item.AccessibleName);
+                var dropDown = item as ToolStripDropDownItem;
+                if (dropDown != null) CollectItemTexts(dropDown.DropDownItems, texts);
+            }
+        }
+
+        private static void CollectNodeTexts(TreeNodeCollection nodes, List<string> texts)
+        {
+            foreach (TreeNode node in nodes)
+            {
+                AddText(texts, node.Text);
+                CollectNodeTexts(node.Nodes, texts);
+            }
+        }
+
+        private static void AddText(List<string> texts, string text)
+        {
+            if (!string.IsNullOrEmpty(text)) texts.Add(text);
         }
 
         private static string[] SortedCopy(string[] values)

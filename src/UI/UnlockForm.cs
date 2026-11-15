@@ -66,7 +66,7 @@ namespace KeyBox.UI
 
             Label title = Ui.MakeLabel(Program.AppName);
             title.Font = Ui.TitleFont;
-            Label subtitle = Ui.MakeLabel(createMode ? "Создание нового хранилища паролей" : "Хранилище заблокировано");
+            Label subtitle = Ui.MakeLabel(createMode ? L.T("Создание нового хранилища паролей", "Create a new password vault") : L.T("Хранилище заблокировано", "The vault is locked"));
             subtitle.Name = "lblSubtitle";
             subtitle.ForeColor = Ui.Muted;
             subtitle.Margin = new Padding(Ui.S(2), 0, 0, 0);
@@ -78,7 +78,7 @@ namespace KeyBox.UI
             Body.Controls.Add(header);
 
             // Мастер-пароль и кнопка «показать».
-            Body.Controls.Add(Ui.MakeLabel(createMode ? "Придумайте мастер-пароль" : "Мастер-пароль"));
+            Body.Controls.Add(Ui.MakeLabel(createMode ? L.T("Придумайте мастер-пароль", "Choose a master password") : L.T("Мастер-пароль", "Master password")));
 
             var passwordRow = new TableLayoutPanel();
             passwordRow.AutoSize = true;
@@ -103,7 +103,7 @@ namespace KeyBox.UI
             chkShow.TabStop = false;
             chkShow.CheckedChanged += OnShowChanged;
             var tips = new ToolTip();
-            tips.SetToolTip(chkShow, "Показать пароль");
+            tips.SetToolTip(chkShow, L.T("Показать пароль", "Show password"));
             Disposed += delegate { tips.Dispose(); };
 
             passwordRow.Controls.Add(txtPassword, 0, 0);
@@ -112,7 +112,7 @@ namespace KeyBox.UI
 
             if (createMode)
             {
-                Label confirmLabel = Ui.MakeLabel("Повторите мастер-пароль");
+                Label confirmLabel = Ui.MakeLabel(L.T("Повторите мастер-пароль", "Repeat the master password"));
                 confirmLabel.Margin = new Padding(0, Ui.S(12), 0, 0);
                 Body.Controls.Add(confirmLabel);
 
@@ -131,7 +131,7 @@ namespace KeyBox.UI
                 Body.Controls.Add(lblHint);
 
                 Label warning = Ui.MakeWrapLabel(
-                    "Запомните мастер-пароль: восстановить его нельзя. Без него открыть хранилище не сможет никто — в том числе и вы.",
+                    L.T("Запомните мастер-пароль: восстановить его нельзя. Без него открыть хранилище не сможет никто — в том числе и вы.", "Remember the master password: it cannot be recovered. Without it nobody can open the vault — including you."),
                     ContentWidth, Ui.TextColor);
                 warning.Margin = new Padding(0, Ui.S(12), 0, 0);
                 Body.Controls.Add(warning);
@@ -149,7 +149,7 @@ namespace KeyBox.UI
             path.UseMnemonic = false;
             path.Font = Ui.SmallFont;
             path.ForeColor = Ui.Muted;
-            const string pathPrefix = "Файл: ";
+            string pathPrefix = L.T("Файл: ", "File: ");
             int prefixWidth = TextRenderer.MeasureText(pathPrefix, Ui.SmallFont).Width;
             path.Text = pathPrefix + Ui.FitPath(vaultPath, Ui.SmallFont, ContentWidth - prefixWidth);
             path.Height = Ui.SmallFont.Height + Ui.S(2);
@@ -158,10 +158,10 @@ namespace KeyBox.UI
             tips.SetToolTip(path, vaultPath);
             Body.Controls.Add(path);
 
-            btnOk = Ui.MakeButton(createMode ? "Создать хранилище" : "Открыть");
+            btnOk = Ui.MakeButton(createMode ? L.T("Создать хранилище", "Create vault") : L.T("Открыть", "Open"));
             btnOk.Name = "btnOk";
             btnOk.Click += OnOk;
-            btnCancel = Ui.MakeButton("Выход");
+            btnCancel = Ui.MakeButton(L.T("Выход", "Exit"));
             btnCancel.Name = "btnCancel";
             btnCancel.DialogResult = DialogResult.Cancel;
             SetButtons(btnOk, btnCancel, false);
@@ -206,7 +206,7 @@ namespace KeyBox.UI
             }
             else if (password.Length == 0)
             {
-                Ui.ShowError(lblError, "Введите мастер-пароль.");
+                Ui.ShowError(lblError, L.T("Введите мастер-пароль.", "Enter the master password."));
                 txtPassword.Focus();
                 return;
             }
@@ -231,21 +231,22 @@ namespace KeyBox.UI
                 if (ex.Error == VaultError.BadFormat && File.Exists(backup))
                 {
                     // Файл испорчен, но рядом лежит предыдущая сохранённая версия.
-                    failure += string.Format(" Рядом есть резервная копия: чтобы открыть её, переименуйте «{0}» в «{1}».",
+                    failure += L.F(" Рядом есть резервная копия: чтобы открыть её, переименуйте «{0}» в «{1}».",
+                        " There is a backup copy next to it: to open it, rename “{0}” to “{1}”.",
                         Path.GetFileName(backup), Path.GetFileName(vaultPath));
                 }
             }
             catch (CryptographicException ex)
             {
-                failure = "Ошибка шифрования. " + ex.Message;
+                failure = L.T("Ошибка шифрования. ", "Encryption error. ") + ex.Message;
             }
             catch (IOException ex)
             {
-                failure = "Ошибка доступа к файлу. " + ex.Message;
+                failure = L.T("Ошибка доступа к файлу. ", "File access error. ") + ex.Message;
             }
             catch (UnauthorizedAccessException ex)
             {
-                failure = "Нет доступа к файлу. " + ex.Message;
+                failure = L.T("Нет доступа к файлу. ", "Access to the file is denied. ") + ex.Message;
             }
 
             busy = false;
@@ -282,11 +283,11 @@ namespace KeyBox.UI
             if (value)
             {
                 Ui.ShowError(lblError, null);
-                btnOk.Text = createMode ? "Создание…" : "Проверка…";
+                btnOk.Text = createMode ? L.T("Создание…", "Creating…") : L.T("Проверка…", "Checking…");
             }
             else
             {
-                btnOk.Text = createMode ? "Создать хранилище" : "Открыть";
+                btnOk.Text = createMode ? L.T("Создать хранилище", "Create vault") : L.T("Открыть", "Open");
             }
         }
 

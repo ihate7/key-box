@@ -32,6 +32,9 @@ namespace KeyBox.Tests
         {
             Console.OutputEncoding = new UTF8Encoding(false);
 
+            // Тесты сверяют тексты сообщений, поэтому язык задаётся явно, а не берётся из системы.
+            L.Current = Language.Russian;
+
             workDir = args.Length > 0
                 ? Path.GetFullPath(args[0])
                 : Path.Combine(Path.GetTempPath(), "keybox-tests-" + Guid.NewGuid().ToString("N"));
@@ -68,6 +71,8 @@ namespace KeyBox.Tests
             Run("nested groups: file versions 1 and 2, broken links", NestedGroupsJson);
             Run("json: unicode and special characters", JsonSpecialCharacters);
             Run("json: damaged and foreign data", JsonNormalisation);
+            Run("localisation: plural forms, dates, language choice", LocalisationBasics);
+            Run("localisation: every text in the sources has both languages", LocalisationCoverage);
             Run("generator: alphabet, classes, uniqueness", GeneratorProperties);
             Run("large vault: 5000 entries", LargeVault);
             Run("interop: files shared with the Node.js implementation", Interop);
@@ -1125,6 +1130,242 @@ namespace KeyBox.Tests
                 // И такие данные должны нормально сохраняться обратно.
                 Check(VaultData.FromJson(data.ToJson()).Entries.Count == data.Entries.Count, "round trip for <" + text + ">");
             }
+        }
+
+        // ---------- Язык интерфейса ----------
+
+        private static void LocalisationBasics()
+        {
+            Func<int, string> entries = delegate(int n) { return L.Plural(n, "запись", "записи", "записей", "entry", "entries"); };
+            var moment = new DateTime(2026, 3, 9, 7, 5, 0);
+
+            Language before = L.Current;
+            try
+            {
+                L.Current = Language.Russian;
+                Check(L.T("да", "yes") == "да" && !L.IsEnglish, "russian text is chosen");
+                Check(entries(1) == "1 запись" && entries(2) == "2 записи" && entries(5) == "5 записей", "russian plural forms");
+                Check(entries(11) == "11 записей" && entries(21) == "21 запись" && entries(112) == "112 записей" && entries(0) == "0 записей",
+                    "russian plural forms of larger numbers");
+                Check(L.F("{0} из {1}", "{0} of {1}", 3, 8) == "3 из 8", "formatting in Russian");
+                Check(L.FormatTime(moment) == "09.03.2026 07:05", "russian date: " + L.FormatTime(moment));
+                Check(VaultData.CreateEmpty().ValidateGroupName(" ", null, null) == "Введите название группы.", "model messages in Russian");
+
+                L.Current = Language.English;
+                Check(L.T("да", "yes") == "yes" && L.IsEnglish, "english text is chosen");
+                Check(entries(1) == "1 entry" && entries(2) == "2 entries" && entries(0) == "0 entries" && entries(21) == "21 entries",
+                    "english plural forms");
+                Check(L.F("{0} из {1}", "{0} of {1}", 3, 8) == "3 of 8", "formatting in English");
+                Check(L.FormatTime(moment) == "2026-03-09 07:05", "english date: " + L.FormatTime(moment));
+                Check(VaultData.CreateEmpty().ValidateGroupName(" ", null, null) == "Enter a group name.", "model messages in English");
+                try
+                {
+                    VaultFormat.ParseHeader(new byte[100]);
+                    Check(false, "a foreign file must be rejected");
+                }
+                catch (VaultException ex)
+                {
+                    Check(ex.Message.Length > 10 && !HasCyrillic(ex.Message), "file errors in English: " + ex.Message);
+                }
+
+                Check(L.FromSetting("ru") == Language.Russian && L.FromSetting("EN") == Language.English, "explicit language setting");
+                Check(L.FromSetting("auto") == L.DetectSystemLanguage() && L.FromSetting(null) == L.DetectSystemLanguage(),
+                    "any other value follows the system");
+            }
+            finally
+            {
+                L.Current = before;
+            }
+        }
+
+        /// <summary>
+        /// Просматривает исходники программы. Любая строка с кириллицей должна быть русским
+        /// вариантом в L.T, L.F или L.Plural, а в английских вариантах кириллицы быть не должно.
+        /// Так нельзя добавить текст и забыть его перевести.
+        /// </summary>
+        private static void LocalisationCoverage()
+        {
+            string folder = FindSources();
+            if (folder == null)
+            {
+                Console.WriteLine("      note: the src folder was not found next to the tests, the check is skipped");
+                return;
+            }
+
+            var problems = new List<string>();
+            int translated = 0;
+            foreach (string file in Directory.GetFiles(folder, "*.cs", SearchOption.AllDirectories))
+            {
+                translated += ScanSource(Path.GetFileName(file), File.ReadAllText(file, Encoding.UTF8), problems);
+            }
+
+            Check(translated > 200, "the scan sees the texts of the program: " + translated);
+            Check(problems.Count == 0, problems.Count + " problem(s): " +
+                string.Join(" | ", problems.GetRange(0, Math.Min(5, problems.Count)).ToArray()));
+
+            // Сама проверка тоже проверяется: непереведённая строка и кириллица в английском варианте ловятся.
+            var planted = new List<string>();
+            ScanSource("sample", "var a = \"привет\"; var b = L.T(\"да\", \"нет\"); var c = L.F(\"x\" + \"ы\", \"y\", f(1, 2)); // \"мимо\"", planted);
+            Check(planted.Count == 2, "the scanner catches planted mistakes: " + string.Join(" | ", planted.ToArray()));
+        }
+
+        private sealed class LocalisationCall
+        {
+            public string Name;
+            public int Depth;
+            public int Argument;
+        }
+
+        /// <summary>Возвращает число найденных русских текстов, у которых есть перевод.</summary>
+        private static int ScanSource(string name, string text, List<string> problems)
+        {
+            var calls = new List<LocalisationCall>();
+            int depth = 0;
+            int line = 1;
+            int translated = 0;
+            int i = 0;
+            while (i < text.Length)
+            {
+                char c = text[i];
+                if (c == '\n')
+                {
+                    line++;
+                    i++;
+                }
+                else if (c == '/' && i + 1 < text.Length && text[i + 1] == '/')
+                {
+                    while (i < text.Length && text[i] != '\n') i++;
+                }
+                else if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
+                {
+                    i += 2;
+                    while (i + 1 < text.Length && !(text[i] == '*' && text[i + 1] == '/'))
+                    {
+                        if (text[i] == '\n') line++;
+                        i++;
+                    }
+                    i += 2;
+                }
+                else if (c == '\'')
+                {
+                    // Символьная константа: 'x', '\n', '\''.
+                    i++;
+                    while (i < text.Length && text[i] != '\'')
+                    {
+                        if (text[i] == '\\') i++;
+                        i++;
+                    }
+                    i++;
+                }
+                else if (c == '"' || (c == '@' && i + 1 < text.Length && text[i + 1] == '"'))
+                {
+                    bool verbatim = c == '@';
+                    int start = verbatim ? i + 2 : i + 1;
+                    int end = start;
+                    while (end < text.Length)
+                    {
+                        if (verbatim && text[end] == '"' && end + 1 < text.Length && text[end + 1] == '"')
+                        {
+                            end += 2;
+                            continue;
+                        }
+                        if (!verbatim && text[end] == '\\')
+                        {
+                            end += 2;
+                            continue;
+                        }
+                        if (text[end] == '"') break;
+                        if (text[end] == '\n') line++;
+                        end++;
+                    }
+                    end = Math.Min(end, text.Length);
+
+                    string literal = text.Substring(start, end - start);
+                    if (HasCyrillic(literal))
+                    {
+                        LocalisationCall call = calls.Count > 0 ? calls[calls.Count - 1] : null;
+                        bool inPlace = call != null &&
+                            (call.Name == "Plural" ? call.Argument >= 1 && call.Argument <= 3 : call.Argument == 0);
+                        if (inPlace)
+                        {
+                            translated++;
+                        }
+                        else
+                        {
+                            problems.Add(name + ":" + line + (call == null ? " has no translation: " : " is in the wrong argument: ") + literal);
+                        }
+                    }
+                    i = end + 1;
+                }
+                else if (c == '(' || c == '[' || c == '{')
+                {
+                    depth++;
+                    string callName = c == '(' ? LocalisationCallName(text, i) : null;
+                    if (callName != null)
+                    {
+                        var call = new LocalisationCall();
+                        call.Name = callName;
+                        call.Depth = depth;
+                        calls.Add(call);
+                    }
+                    i++;
+                }
+                else if (c == ')' || c == ']' || c == '}')
+                {
+                    if (c == ')' && calls.Count > 0 && calls[calls.Count - 1].Depth == depth) calls.RemoveAt(calls.Count - 1);
+                    depth--;
+                    i++;
+                }
+                else
+                {
+                    if (c == ',' && calls.Count > 0 && calls[calls.Count - 1].Depth == depth) calls[calls.Count - 1].Argument++;
+                    i++;
+                }
+            }
+            return translated;
+        }
+
+        /// <summary>Если скобка в позиции open открывает вызов L.T, L.F или L.Plural — имя метода, иначе null.</summary>
+        private static string LocalisationCallName(string text, int open)
+        {
+            int end = open;
+            while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
+            foreach (string name in new[] { "T", "F", "Plural" })
+            {
+                string token = "L." + name;
+                int start = end - token.Length;
+                if (start < 0 || string.CompareOrdinal(text, start, token, 0, token.Length) != 0) continue;
+                if (start == 0) return name;
+                char before = text[start - 1];
+                if (!char.IsLetterOrDigit(before) && before != '_' && before != '.') return name;
+            }
+            return null;
+        }
+
+        private static bool HasCyrillic(string text)
+        {
+            foreach (char c in text)
+            {
+                if (c >= 0x0400 && c <= 0x04FF) return true;
+            }
+            return false;
+        }
+
+        private static string FindSources()
+        {
+            var candidates = new List<string>();
+            candidates.Add(Path.Combine(Environment.CurrentDirectory, "src"));
+            string folder = AppDomain.CurrentDomain.BaseDirectory;
+            for (int i = 0; i < 4 && !string.IsNullOrEmpty(folder); i++)
+            {
+                candidates.Add(Path.Combine(folder, "src"));
+                folder = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar));
+            }
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(Path.Combine(candidate, "L.cs"))) return candidate;
+            }
+            return null;
         }
 
         // ---------- Прочее ----------

@@ -133,7 +133,7 @@ namespace KeyBox.UI
         }
     }
 
-    /// <summary>Сообщения и подтверждения в едином стиле с кнопками на русском языке.</summary>
+    /// <summary>Сообщения и подтверждения в едином стиле с кнопками на языке интерфейса.</summary>
     internal sealed class MsgBox : DialogForm
     {
         /// <summary>Наибольшая ширина текста сообщения в пикселях; длинные пути стоит сокращать под неё.</summary>
@@ -212,13 +212,13 @@ namespace KeyBox.UI
         /// <summary>Сообщение о сбое с предложением повторить операцию.</summary>
         public static bool Retry(IWin32Window owner, string title, string text)
         {
-            return Show(owner, title, text, Ui.GlyphError, Ui.Danger, SystemIcons.Error, "Повторить", "Отмена", false);
+            return Show(owner, title, text, Ui.GlyphError, Ui.Danger, SystemIcons.Error, L.T("Повторить", "Retry"), L.T("Отмена", "Cancel"), false);
         }
 
         /// <summary>Вопрос о необратимом действии: по умолчанию выбрана «Отмена».</summary>
         public static bool ConfirmDanger(IWin32Window owner, string title, string text, string okText)
         {
-            return Show(owner, title, text, Ui.GlyphWarning, Color.FromArgb(202, 138, 4), SystemIcons.Warning, okText, "Отмена", true);
+            return Show(owner, title, text, Ui.GlyphWarning, Color.FromArgb(202, 138, 4), SystemIcons.Warning, okText, L.T("Отмена", "Cancel"), true);
         }
 
         private static bool Show(IWin32Window owner, string title, string text, int glyph, Color color, Icon fallbackIcon,
@@ -241,15 +241,15 @@ namespace KeyBox.UI
         {
             if (string.IsNullOrEmpty(password))
             {
-                return "Введите мастер-пароль.";
+                return L.T("Введите мастер-пароль.", "Enter the master password.");
             }
             if (password.Length < MinLength)
             {
-                return string.Format("Мастер-пароль должен быть не короче {0} символов.", MinLength);
+                return L.F("Мастер-пароль должен быть не короче {0} символов.", "The master password must be at least {0} characters long.", MinLength);
             }
             if (password != confirmation)
             {
-                return "Пароли не совпадают. Введите одинаковый пароль в оба поля.";
+                return L.T("Пароли не совпадают. Введите одинаковый пароль в оба поля.", "The passwords do not match. Enter the same password in both fields.");
             }
             return null;
         }
@@ -261,26 +261,26 @@ namespace KeyBox.UI
             if (length == 0)
             {
                 color = Ui.Muted;
-                return string.Format("Не короче {0} символов. Лучше всего — фраза из нескольких слов.", MinLength);
+                return L.F("Не короче {0} символов. Лучше всего — фраза из нескольких слов.", "At least {0} characters. A phrase of several words works best.", MinLength);
             }
             if (length < MinLength)
             {
                 color = Ui.Danger;
-                return string.Format("Слишком короткий: нужно ещё {0}.",
-                    Ui.Plural(MinLength - length, "символ", "символа", "символов"));
+                return L.F("Слишком короткий: нужно ещё {0}.", "Too short: add at least {0}.",
+                    L.Plural(MinLength - length, "символ", "символа", "символов", "character", "characters"));
             }
             if (IsTrivial(password))
             {
                 color = Ui.Danger;
-                return "Такой пароль легко подобрать: добавьте буквы или слова.";
+                return L.T("Такой пароль легко подобрать: добавьте буквы или слова.", "This password is easy to guess: add letters or words.");
             }
             if (length < 12)
             {
                 color = Ui.Muted;
-                return "Подходит. Надёжнее — от 12 символов.";
+                return L.T("Подходит. Надёжнее — от 12 символов.", "Acceptable. 12 characters or more would be safer.");
             }
             color = Ui.Success;
-            return length < 16 ? "Хорошая длина." : "Отличная длина.";
+            return length < 16 ? L.T("Хорошая длина.", "Good length.") : L.T("Отличная длина.", "Excellent length.");
         }
 
         /// <summary>Одни цифры или один повторяющийся символ.</summary>

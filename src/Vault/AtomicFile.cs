@@ -47,7 +47,7 @@ namespace KeyBox.Vault
             if (!SameBytes(written, content))
             {
                 TryDelete(temp);
-                throw new IOException("Записанные данные не совпали с исходными. Возможно, носитель неисправен.");
+                throw new IOException(L.T("Записанные данные не совпали с исходными. Возможно, носитель неисправен.", "The written data does not match the original. The drive may be faulty."));
             }
 
             if (File.Exists(path))

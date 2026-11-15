@@ -33,7 +33,7 @@ namespace KeyBox.UI
         /// <param name="group">Изменяемая группа или null для новой.</param>
         /// <param name="parentId">Где группа находится изначально (null — верхний уровень).</param>
         public GroupForm(VaultData data, Group group, string parentId)
-            : base(group == null ? "Новая группа" : "Изменение группы", 440)
+            : base(group == null ? L.T("Новая группа", "New group") : L.T("Изменение группы", "Edit group"), 440)
         {
             this.data = data;
             this.group = group;
@@ -42,7 +42,7 @@ namespace KeyBox.UI
             Body.ColumnCount = 1;
             Body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-            Body.Controls.Add(Ui.MakeLabel("Название"));
+            Body.Controls.Add(Ui.MakeLabel(L.T("Название", "Name")));
 
             txtName = new TextBox();
             txtName.Name = "txtName";
@@ -53,7 +53,7 @@ namespace KeyBox.UI
             txtName.TextChanged += delegate { Ui.ShowError(lblError, null); };
             Body.Controls.Add(txtName);
 
-            Label parentLabel = Ui.MakeLabel("Находится в");
+            Label parentLabel = Ui.MakeLabel(L.T("Находится в", "Located in"));
             parentLabel.Margin = new Padding(0, Ui.S(14), 0, 0);
             Body.Controls.Add(parentLabel);
 
@@ -75,10 +75,10 @@ namespace KeyBox.UI
             lblError.Margin = new Padding(0, Ui.S(10), 0, 0);
             Body.Controls.Add(lblError);
 
-            Button ok = Ui.MakeButton(group == null ? "Создать" : "Сохранить");
+            Button ok = Ui.MakeButton(group == null ? L.T("Создать", "Create") : L.T("Сохранить", "Save"));
             ok.Name = "btnOk";
             ok.Click += OnOk;
-            Button cancel = Ui.MakeButton("Отмена");
+            Button cancel = Ui.MakeButton(L.T("Отмена", "Cancel"));
             cancel.Name = "btnCancel";
             cancel.DialogResult = DialogResult.Cancel;
             SetButtons(ok, cancel, false);
@@ -115,7 +115,7 @@ namespace KeyBox.UI
 
             var top = new ParentChoice();
             top.Id = null;
-            top.Text = "Верхний уровень";
+            top.Text = L.T("Верхний уровень", "Top level");
             cmbParent.Items.Add(top);
             cmbParent.SelectedIndex = 0;
 

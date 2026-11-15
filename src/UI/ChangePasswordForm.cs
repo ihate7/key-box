@@ -23,7 +23,7 @@ namespace KeyBox.UI
         private bool busy;
 
         public ChangePasswordForm(VaultSession session)
-            : base("Смена мастер-пароля", 430)
+            : base(L.T("Смена мастер-пароля", "Change master password"), 430)
         {
             this.session = session;
             Name = "ChangePasswordForm";
@@ -31,18 +31,18 @@ namespace KeyBox.UI
             Body.ColumnCount = 1;
             Body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-            Body.Controls.Add(Ui.MakeLabel("Текущий мастер-пароль"));
+            Body.Controls.Add(Ui.MakeLabel(L.T("Текущий мастер-пароль", "Current master password")));
             txtCurrent = MakePasswordBox("txtCurrent");
             Body.Controls.Add(txtCurrent);
 
-            Label newLabel = Ui.MakeLabel("Новый мастер-пароль");
+            Label newLabel = Ui.MakeLabel(L.T("Новый мастер-пароль", "New master password"));
             newLabel.Margin = new Padding(0, Ui.S(14), 0, 0);
             Body.Controls.Add(newLabel);
             txtNew = MakePasswordBox("txtNew");
             txtNew.TextChanged += delegate { UpdateHint(); };
             Body.Controls.Add(txtNew);
 
-            Label confirmLabel = Ui.MakeLabel("Повторите новый пароль");
+            Label confirmLabel = Ui.MakeLabel(L.T("Повторите новый пароль", "Repeat the new password"));
             confirmLabel.Margin = new Padding(0, Ui.S(12), 0, 0);
             Body.Controls.Add(confirmLabel);
             txtConfirm = MakePasswordBox("txtConfirm");
@@ -55,7 +55,7 @@ namespace KeyBox.UI
 
             chkShow = new CheckBox();
             chkShow.Name = "chkShow";
-            chkShow.Text = "Показать пароли";
+            chkShow.Text = L.T("Показать пароли", "Show passwords");
             chkShow.AutoSize = true;
             chkShow.Margin = new Padding(0, Ui.S(10), 0, 0);
             chkShow.CheckedChanged += delegate
@@ -71,10 +71,10 @@ namespace KeyBox.UI
             lblError.Margin = new Padding(0, Ui.S(10), 0, 0);
             Body.Controls.Add(lblError);
 
-            btnOk = Ui.MakeButton("Сменить пароль");
+            btnOk = Ui.MakeButton(L.T("Сменить пароль", "Change password"));
             btnOk.Name = "btnOk";
             btnOk.Click += OnOk;
-            btnCancel = Ui.MakeButton("Отмена");
+            btnCancel = Ui.MakeButton(L.T("Отмена", "Cancel"));
             btnCancel.Name = "btnCancel";
             btnCancel.DialogResult = DialogResult.Cancel;
             SetButtons(btnOk, btnCancel, false);
@@ -109,7 +109,7 @@ namespace KeyBox.UI
 
             if (current.Length == 0)
             {
-                Fail("Введите текущий мастер-пароль.", txtCurrent);
+                Fail(L.T("Введите текущий мастер-пароль.", "Enter the current master password."), txtCurrent);
                 return;
             }
             string problem = MasterPasswordRules.Check(replacement, txtConfirm.Text);
@@ -120,7 +120,7 @@ namespace KeyBox.UI
             }
             if (replacement == current)
             {
-                Fail("Новый пароль совпадает с текущим.", txtNew);
+                Fail(L.T("Новый пароль совпадает с текущим.", "The new password is the same as the current one."), txtNew);
                 return;
             }
 
@@ -143,15 +143,15 @@ namespace KeyBox.UI
             }
             catch (CryptographicException ex)
             {
-                failure = "Ошибка шифрования. " + ex.Message;
+                failure = L.T("Ошибка шифрования. ", "Encryption error. ") + ex.Message;
             }
             catch (IOException ex)
             {
-                failure = "Ошибка доступа к файлу. " + ex.Message;
+                failure = L.T("Ошибка доступа к файлу. ", "File access error. ") + ex.Message;
             }
             catch (ObjectDisposedException)
             {
-                failure = "Хранилище уже закрыто.";
+                failure = L.T("Хранилище уже закрыто.", "The vault is already closed.");
             }
 
             busy = false;
@@ -160,12 +160,12 @@ namespace KeyBox.UI
 
             if (failure != null)
             {
-                Fail(failure + " Мастер-пароль не изменён.", txtNew);
+                Fail(failure + L.T(" Мастер-пароль не изменён.", " The master password was not changed."), txtNew);
                 return;
             }
             if (wrongCurrent)
             {
-                Fail("Текущий мастер-пароль указан неверно.", txtCurrent);
+                Fail(L.T("Текущий мастер-пароль указан неверно.", "The current master password is incorrect."), txtCurrent);
                 return;
             }
 
@@ -192,7 +192,7 @@ namespace KeyBox.UI
             btnOk.Enabled = !value;
             btnCancel.Enabled = !value;
             UseWaitCursor = value;
-            btnOk.Text = value ? "Шифрование…" : "Сменить пароль";
+            btnOk.Text = value ? L.T("Шифрование…", "Encrypting…") : L.T("Сменить пароль", "Change password");
             if (value) Ui.ShowError(lblError, null);
         }
 

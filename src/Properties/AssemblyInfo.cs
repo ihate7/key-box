@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
 [assembly: AssemblyTitle("KeyBox")]
-[assembly: AssemblyDescription("Портативное зашифрованное хранилище паролей")]
+[assembly: AssemblyDescription("Portable encrypted password vault")]
 [assembly: AssemblyProduct("KeyBox")]
 [assembly: AssemblyVersion("1.1.0.0")]
 [assembly: AssemblyFileVersion("1.1.0.0")]

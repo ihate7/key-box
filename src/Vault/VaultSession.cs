@@ -45,7 +45,7 @@ namespace KeyBox.Vault
         {
             if (File.Exists(path))
             {
-                throw new VaultException(VaultError.Io, "Файл хранилища уже существует: " + path);
+                throw new VaultException(VaultError.Io, L.F("Файл хранилища уже существует: {0}", "The vault file already exists: {0}", path));
             }
 
             var session = new VaultSession();
@@ -220,11 +220,11 @@ namespace KeyBox.Vault
                 var info = new FileInfo(path);
                 if (!info.Exists)
                 {
-                    throw new VaultException(VaultError.Io, "Файл хранилища не найден: " + path);
+                    throw new VaultException(VaultError.Io, L.F("Файл хранилища не найден: {0}", "The vault file was not found: {0}", path));
                 }
                 if (info.Length > VaultFormat.MaxFileSize)
                 {
-                    throw new VaultException(VaultError.BadFormat, "Файл слишком велик для хранилища KeyBox.");
+                    throw new VaultException(VaultError.BadFormat, L.T("Файл слишком велик для хранилища KeyBox.", "The file is too large to be a KeyBox vault."));
                 }
                 return File.ReadAllBytes(path);
             }
@@ -253,12 +253,12 @@ namespace KeyBox.Vault
 
         private static VaultException ReadFailed(Exception ex)
         {
-            return new VaultException(VaultError.Io, "Не удалось прочитать файл хранилища. " + ex.Message, ex);
+            return new VaultException(VaultError.Io, L.T("Не удалось прочитать файл хранилища. ", "Could not read the vault file. ") + ex.Message, ex);
         }
 
         private static VaultException WriteFailed(Exception ex)
         {
-            return new VaultException(VaultError.Io, "Не удалось записать файл хранилища. " + ex.Message, ex);
+            return new VaultException(VaultError.Io, L.T("Не удалось записать файл хранилища. ", "Could not write the vault file. ") + ex.Message, ex);
         }
 
         private static bool FixedTimeEquals(byte[] a, byte[] b)

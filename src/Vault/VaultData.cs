@@ -291,11 +291,11 @@ namespace KeyBox.Vault
             string trimmed = (name ?? "").Trim();
             if (trimmed.Length == 0)
             {
-                return "Введите название группы.";
+                return L.T("Введите название группы.", "Enter a group name.");
             }
             if (trimmed.Length > MaxGroupNameLength)
             {
-                return string.Format("Название группы не должно быть длиннее {0} символов.", MaxGroupNameLength);
+                return L.F("Название группы не должно быть длиннее {0} символов.", "A group name cannot be longer than {0} characters.", MaxGroupNameLength);
             }
 
             string parent = NormalizeId(parentId);
@@ -306,8 +306,8 @@ namespace KeyBox.Vault
                 {
                     Group owner = FindGroup(parent);
                     return owner == null
-                        ? string.Format("Группа «{0}» уже существует.", group.Name)
-                        : string.Format("В группе «{0}» уже есть подгруппа «{1}».", owner.Name, group.Name);
+                        ? L.F("Группа «{0}» уже существует.", "The group “{0}” already exists.", group.Name)
+                        : L.F("В группе «{0}» уже есть подгруппа «{1}».", "The group “{0}” already has a subgroup “{1}”.", owner.Name, group.Name);
                 }
             }
             return null;
@@ -321,21 +321,21 @@ namespace KeyBox.Vault
         {
             string parent = NormalizeId(parentId);
             if (parent == null) return null;
-            if (FindGroup(parent) == null) return "Группа не найдена.";
+            if (FindGroup(parent) == null) return L.T("Группа не найдена.", "Group not found.");
 
             int levels = 1;
             if (!string.IsNullOrEmpty(groupId))
             {
-                if (parent == groupId) return "Группу нельзя вложить в саму себя.";
+                if (parent == groupId) return L.T("Группу нельзя вложить в саму себя.", "A group cannot be placed inside itself.");
                 foreach (Group descendant in DescendantsOf(groupId))
                 {
-                    if (descendant.Id == parent) return "Группу нельзя вложить в её собственную подгруппу.";
+                    if (descendant.Id == parent) return L.T("Группу нельзя вложить в её собственную подгруппу.", "A group cannot be placed inside its own subgroup.");
                 }
                 levels = HeightOf(groupId, 0);
             }
             if (DepthOf(parent) + levels > MaxGroupDepth)
             {
-                return string.Format("Слишком глубокая вложенность: допускается не больше {0} уровней.", MaxGroupDepth);
+                return L.F("Слишком глубокая вложенность: допускается не больше {0} уровней.", "Nesting is too deep: no more than {0} levels are allowed.", MaxGroupDepth);
             }
             return null;
         }
@@ -471,19 +471,19 @@ namespace KeyBox.Vault
         {
             if (IsBlank(login) && IsBlank(description))
             {
-                return "Заполните описание или логин.";
+                return L.T("Заполните описание или логин.", "Fill in the description or the username.");
             }
             if ((login ?? "").Length > MaxLoginLength)
             {
-                return string.Format("Логин не должен быть длиннее {0} символов.", MaxLoginLength);
+                return L.F("Логин не должен быть длиннее {0} символов.", "The username cannot be longer than {0} characters.", MaxLoginLength);
             }
             if ((password ?? "").Length > MaxPasswordLength)
             {
-                return string.Format("Пароль не должен быть длиннее {0} символов.", MaxPasswordLength);
+                return L.F("Пароль не должен быть длиннее {0} символов.", "The password cannot be longer than {0} characters.", MaxPasswordLength);
             }
             if ((description ?? "").Length > MaxDescriptionLength)
             {
-                return string.Format("Описание не должно быть длиннее {0} символов.", MaxDescriptionLength);
+                return L.F("Описание не должно быть длиннее {0} символов.", "The description cannot be longer than {0} characters.", MaxDescriptionLength);
             }
             return null;
         }
@@ -654,12 +654,12 @@ namespace KeyBox.Vault
             if (failure != null || data == null)
             {
                 throw new VaultException(VaultError.BadFormat,
-                    "Содержимое хранилища повреждено и не может быть прочитано.", failure);
+                    L.T("Содержимое хранилища повреждено и не может быть прочитано.", "The vault contents are damaged and cannot be read."), failure);
             }
             if (data.Version > CurrentVersion)
             {
                 throw new VaultException(VaultError.UnsupportedVersion,
-                    "Хранилище создано более новой версией KeyBox. Обновите программу.");
+                    L.T("Хранилище создано более новой версией KeyBox. Обновите программу.", "The vault was created by a newer version of KeyBox. Update the program."));
             }
             data.Normalize();
             return data;
@@ -692,7 +692,7 @@ namespace KeyBox.Vault
                 }
                 groupIds.Add(group.Id);
                 group.Name = (group.Name ?? "").Trim();
-                if (group.Name.Length == 0) group.Name = "Группа";
+                if (group.Name.Length == 0) group.Name = L.T("Группа", "Group");
             }
 
             // Ссылки на родительские группы: несуществующая или на саму себя — группа уходит на верхний уровень.
@@ -746,14 +746,14 @@ namespace KeyBox.Vault
         private Group RequireGroup(string id)
         {
             Group group = FindGroup(id);
-            if (group == null) throw new ValidationException("Группа не найдена.");
+            if (group == null) throw new ValidationException(L.T("Группа не найдена.", "Group not found."));
             return group;
         }
 
         private Entry RequireEntry(string id)
         {
             Entry entry = FindEntry(id);
-            if (entry == null) throw new ValidationException("Запись не найдена.");
+            if (entry == null) throw new ValidationException(L.T("Запись не найдена.", "Entry not found."));
             return entry;
         }
 

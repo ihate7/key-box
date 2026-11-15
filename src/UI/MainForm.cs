@@ -169,33 +169,33 @@ namespace KeyBox.UI
             toolbar.ShowItemToolTips = true;
             toolbar.TabStop = true;   // до панели можно дойти клавишей Tab — все команды доступны без мыши
 
-            btnAdd = ToolButton("btnAdd", "Добавить", Ui.GlyphAdd, "Новая запись (Ins)", true, delegate { AddEntry(); });
-            btnEdit = ToolButton("btnEdit", "Изменить", Ui.GlyphEdit, "Изменить запись (Enter)", true, delegate { EditEntry(); });
-            btnDelete = ToolButton("btnDelete", "Удалить", Ui.GlyphDelete, "Удалить выбранные записи (Del)", true, delegate { DeleteEntries(); });
-            btnCopyLogin = ToolButton("btnCopyLogin", "Логин", Ui.GlyphCopy, "Копировать логин (Ctrl+B)", true, delegate { CopyField(false); });
-            btnCopyPassword = ToolButton("btnCopyPassword", "Пароль", Ui.GlyphCopy, "Копировать пароль (Ctrl+C)", true, delegate { CopyField(true); });
+            btnAdd = ToolButton("btnAdd", L.T("Добавить", "Add"), Ui.GlyphAdd, L.T("Новая запись (Ins)", "New entry (Ins)"), true, delegate { AddEntry(); });
+            btnEdit = ToolButton("btnEdit", L.T("Изменить", "Edit"), Ui.GlyphEdit, L.T("Изменить запись (Enter)", "Edit entry (Enter)"), true, delegate { EditEntry(); });
+            btnDelete = ToolButton("btnDelete", L.T("Удалить", "Delete"), Ui.GlyphDelete, L.T("Удалить выбранные записи (Del)", "Delete selected entries (Del)"), true, delegate { DeleteEntries(); });
+            btnCopyLogin = ToolButton("btnCopyLogin", L.T("Логин", "Username"), Ui.GlyphCopy, L.T("Копировать логин (Ctrl+B)", "Copy username (Ctrl+B)"), true, delegate { CopyField(false); });
+            btnCopyPassword = ToolButton("btnCopyPassword", L.T("Пароль", "Password"), Ui.GlyphCopy, L.T("Копировать пароль (Ctrl+C)", "Copy password (Ctrl+C)"), true, delegate { CopyField(true); });
 
-            btnMove = new ToolStripDropDownButton("В группу");
+            btnMove = new ToolStripDropDownButton(L.T("В группу", "Move to"));
             btnMove.Name = "btnMove";
-            StyleToolItem(btnMove, Ui.GlyphMove, "Переместить выбранные записи в другую группу", true);
+            StyleToolItem(btnMove, Ui.GlyphMove, L.T("Переместить выбранные записи в другую группу", "Move selected entries to another group"), true);
             btnMove.DropDownItems.Add(new ToolStripMenuItem("…"));
             StyleMenu(btnMove.DropDown);
             btnMove.DropDownOpening += delegate { PopulateMoveMenu(btnMove.DropDownItems); };
 
-            btnShow = ToolButton("btnShow", "Показать пароли", Ui.GlyphEye, "Показать или скрыть пароли в списке (Ctrl+H)", false, delegate { SetShowPasswords(btnShow.Checked); });
+            btnShow = ToolButton("btnShow", L.T("Показать пароли", "Show passwords"), Ui.GlyphEye, L.T("Показать или скрыть пароли в списке (Ctrl+H)", "Show or hide passwords in the list (Ctrl+H)"), false, delegate { SetShowPasswords(btnShow.Checked); });
             btnShow.CheckOnClick = true;
 
             // Правый край: поиск, блокировка, прочее. Выровненные вправо элементы
             // добавляются справа налево.
-            btnMore = new ToolStripDropDownButton("Ещё");
+            btnMore = new ToolStripDropDownButton(L.T("Ещё", "More"));
             btnMore.Name = "btnMore";
-            StyleToolItem(btnMore, Ui.GlyphMore, "Смена мастер-пароля, сведения о программе", false);
+            StyleToolItem(btnMore, Ui.GlyphMore, L.T("Смена мастер-пароля, сведения о программе", "Change master password, about the program"), false);
             btnMore.Alignment = ToolStripItemAlignment.Right;
             btnMore.ShowDropDownArrow = false;
-            var miChangePassword = new ToolStripMenuItem("Сменить мастер-пароль…");
+            var miChangePassword = new ToolStripMenuItem(L.T("Сменить мастер-пароль…", "Change master password…"));
             miChangePassword.Name = "miChangePassword";
             miChangePassword.Click += delegate { ChangeMasterPassword(); };
-            var miAbout = new ToolStripMenuItem("О программе");
+            var miAbout = new ToolStripMenuItem(L.T("О программе", "About"));
             miAbout.Name = "miAbout";
             miAbout.Click += delegate { ShowAbout(); };
             StyleMenu(btnMore.DropDown);
@@ -203,7 +203,7 @@ namespace KeyBox.UI
             btnMore.DropDownItems.Add(new ToolStripSeparator());
             btnMore.DropDownItems.Add(miAbout);
 
-            btnLock = ToolButton("btnLock", "Заблокировать", Ui.GlyphLock, "Заблокировать хранилище (Ctrl+L)", true, delegate { RequestLock(true); });
+            btnLock = ToolButton("btnLock", L.T("Заблокировать", "Lock"), Ui.GlyphLock, L.T("Заблокировать хранилище (Ctrl+L)", "Lock the vault (Ctrl+L)"), true, delegate { RequestLock(true); });
             btnLock.Alignment = ToolStripItemAlignment.Right;
 
             txtSearch = new ToolStripTextBox();
@@ -214,12 +214,12 @@ namespace KeyBox.UI
             txtSearch.AutoSize = false;
             txtSearch.Size = new Size(Ui.S(200), txtSearch.TextBox.PreferredHeight);
             txtSearch.Margin = new Padding(Ui.S(6), 0, Ui.S(8), 0);
-            txtSearch.ToolTipText = "Поиск по описанию, логину и названию группы (Ctrl+F)";
-            txtSearch.AccessibleName = "Поиск";
+            txtSearch.ToolTipText = L.T("Поиск по описанию, логину и названию группы (Ctrl+F)", "Search by description, username and group name (Ctrl+F)");
+            txtSearch.AccessibleName = L.T("Поиск", "Search");
             txtSearch.TextChanged += OnSearchChanged;
             txtSearch.TextBox.HandleCreated += delegate
             {
-                NativeMethods.SendMessage(txtSearch.TextBox.Handle, NativeMethods.EM_SETCUEBANNER, (IntPtr)1, "Поиск");
+                NativeMethods.SendMessage(txtSearch.TextBox.Handle, NativeMethods.EM_SETCUEBANNER, (IntPtr)1, L.T("Поиск", "Search"));
             };
 
             toolbar.Items.AddRange(new ToolStripItem[]
@@ -281,7 +281,7 @@ namespace KeyBox.UI
             lblPath.Name = "lblPath";
             lblPath.ForeColor = Ui.Muted;
             lblPath.Text = Ui.FitPath(session.FilePath, Ui.Font, Ui.S(400));
-            lblPath.ToolTipText = "Файл хранилища: " + session.FilePath;
+            lblPath.ToolTipText = L.T("Файл хранилища: ", "Vault file: ") + session.FilePath;
 
             status.Items.AddRange(new ToolStripItem[] { lblCount, lblMessage, lblPath });
         }
@@ -305,13 +305,13 @@ namespace KeyBox.UI
             groupBar.ShowItemToolTips = true;
             groupBar.CanOverflow = false;
 
-            var caption = new ToolStripLabel("Группы");
+            var caption = new ToolStripLabel(L.T("Группы", "Groups"));
             caption.Font = Ui.BoldFont;
             caption.ForeColor = Ui.TextColor;
 
-            btnGroupDelete = ToolButton("btnGroupDelete", "Удалить группу", Ui.GlyphDelete, "Удалить группу (Del)", false, delegate { DeleteGroup(); });
-            btnGroupEdit = ToolButton("btnGroupEdit", "Изменить группу", Ui.GlyphRename, "Переименовать или перенести группу (F2)", false, delegate { EditGroup(); });
-            btnGroupAdd = ToolButton("btnGroupAdd", "Новая группа", Ui.GlyphAdd, "Новая группа (Ctrl+G)", false, delegate { AddGroup(); });
+            btnGroupDelete = ToolButton("btnGroupDelete", L.T("Удалить группу", "Delete group"), Ui.GlyphDelete, L.T("Удалить группу (Del)", "Delete group (Del)"), false, delegate { DeleteGroup(); });
+            btnGroupEdit = ToolButton("btnGroupEdit", L.T("Изменить группу", "Edit group"), Ui.GlyphRename, L.T("Переименовать или перенести группу (F2)", "Rename or move the group (F2)"), false, delegate { EditGroup(); });
+            btnGroupAdd = ToolButton("btnGroupAdd", L.T("Новая группа", "New group"), Ui.GlyphAdd, L.T("Новая группа (Ctrl+G)", "New group (Ctrl+G)"), false, delegate { AddGroup(); });
             btnGroupDelete.Alignment = ToolStripItemAlignment.Right;
             btnGroupEdit.Alignment = ToolStripItemAlignment.Right;
             btnGroupAdd.Alignment = ToolStripItemAlignment.Right;
@@ -320,7 +320,7 @@ namespace KeyBox.UI
                 // Без шрифта со значками кнопки показывают текст, а полные названия
                 // в узкую панель не помещаются — оставляем короткие обозначения.
                 btnGroupAdd.Text = "+";
-                btnGroupEdit.Text = "Изм.";
+                btnGroupEdit.Text = L.T("Изм.", "Edit");
                 btnGroupDelete.Text = "×";
             }
 
@@ -330,7 +330,7 @@ namespace KeyBox.UI
             treeGroups.Name = "treeGroups";
             treeGroups.Dock = DockStyle.Fill;
             treeGroups.AllowDrop = true;
-            treeGroups.AccessibleName = "Группы";
+            treeGroups.AccessibleName = L.T("Группы", "Groups");
             treeGroups.AfterSelect += OnGroupSelected;
             treeGroups.AfterCollapse += delegate(object sender, TreeViewEventArgs e) { RememberCollapsed(e.Node, true); };
             treeGroups.AfterExpand += delegate(object sender, TreeViewEventArgs e) { RememberCollapsed(e.Node, false); };
@@ -356,11 +356,11 @@ namespace KeyBox.UI
             lvEntries = new EntryListView();
             lvEntries.Name = "lvEntries";
             lvEntries.Dock = DockStyle.Fill;
-            lvEntries.AccessibleName = "Записи";
-            colDescription = lvEntries.Columns.Add("Описание", Ui.S(300));
-            colLogin = lvEntries.Columns.Add("Логин", Ui.S(190));
-            colPassword = lvEntries.Columns.Add("Пароль", Ui.S(120));
-            colGroup = lvEntries.Columns.Add("Группа", Ui.S(210));
+            lvEntries.AccessibleName = L.T("Записи", "Entries");
+            colDescription = lvEntries.Columns.Add(L.T("Описание", "Description"), Ui.S(300));
+            colLogin = lvEntries.Columns.Add(L.T("Логин", "Username"), Ui.S(190));
+            colPassword = lvEntries.Columns.Add(L.T("Пароль", "Password"), Ui.S(120));
+            colGroup = lvEntries.Columns.Add(L.T("Группа", "Group"), Ui.S(210));
 
             // Высота строки в стандартном списке задаётся только высотой значка, поэтому
             // подкладываем прозрачный значок шириной в один пиксель — строки становятся просторнее.
@@ -402,15 +402,15 @@ namespace KeyBox.UI
             StyleMenu(entryMenu);
             entryMenu.Name = "entryMenu";
 
-            ToolStripMenuItem miCopyPassword = MenuItem("Копировать пароль", "Ctrl+C", delegate { CopyField(true); });
-            ToolStripMenuItem miCopyLogin = MenuItem("Копировать логин", "Ctrl+B", delegate { CopyField(false); });
-            ToolStripMenuItem miEdit = MenuItem("Изменить…", "Enter", delegate { EditEntry(); });
-            var miMove = new ToolStripMenuItem("Переместить в группу");
+            ToolStripMenuItem miCopyPassword = MenuItem(L.T("Копировать пароль", "Copy password"), "Ctrl+C", delegate { CopyField(true); });
+            ToolStripMenuItem miCopyLogin = MenuItem(L.T("Копировать логин", "Copy username"), "Ctrl+B", delegate { CopyField(false); });
+            ToolStripMenuItem miEdit = MenuItem(L.T("Изменить…", "Edit…"), "Enter", delegate { EditEntry(); });
+            var miMove = new ToolStripMenuItem(L.T("Переместить в группу", "Move to group"));
             miMove.DropDownItems.Add(new ToolStripMenuItem("…"));
             StyleMenu(miMove.DropDown);
             miMove.DropDownOpening += delegate { PopulateMoveMenu(miMove.DropDownItems); };
-            ToolStripMenuItem miDelete = MenuItem("Удалить", "Del", delegate { DeleteEntries(); });
-            ToolStripMenuItem miAdd = MenuItem("Новая запись…", "Ins", delegate { AddEntry(); });
+            ToolStripMenuItem miDelete = MenuItem(L.T("Удалить", "Delete"), "Del", delegate { DeleteEntries(); });
+            ToolStripMenuItem miAdd = MenuItem(L.T("Новая запись…", "New entry…"), "Ins", delegate { AddEntry(); });
 
             entryMenu.Items.AddRange(new ToolStripItem[]
             {
@@ -432,9 +432,9 @@ namespace KeyBox.UI
             groupMenu = new ContextMenuStrip();
             StyleMenu(groupMenu);
             groupMenu.Name = "groupMenu";
-            ToolStripMenuItem miGroupAdd = MenuItem("Новая группа…", "Ctrl+G", delegate { AddGroup(); });
-            ToolStripMenuItem miGroupEdit = MenuItem("Изменить…", "F2", delegate { EditGroup(); });
-            ToolStripMenuItem miGroupDelete = MenuItem("Удалить группу", "Del", delegate { DeleteGroup(); });
+            ToolStripMenuItem miGroupAdd = MenuItem(L.T("Новая группа…", "New group…"), "Ctrl+G", delegate { AddGroup(); });
+            ToolStripMenuItem miGroupEdit = MenuItem(L.T("Изменить…", "Edit…"), "F2", delegate { EditGroup(); });
+            ToolStripMenuItem miGroupDelete = MenuItem(L.T("Удалить группу", "Delete group"), "Del", delegate { DeleteGroup(); });
             groupMenu.Items.AddRange(new ToolStripItem[] { miGroupAdd, new ToolStripSeparator(), miGroupEdit, miGroupDelete });
             groupMenu.Opening += delegate
             {
@@ -492,7 +492,7 @@ namespace KeyBox.UI
             {
                 treeGroups.Nodes.Clear();
 
-                TreeNode all = MakeGroupNode(FilterKind.All, null, "Все записи", Data.Entries.Count);
+                TreeNode all = MakeGroupNode(FilterKind.All, null, L.T("Все записи", "All entries"), Data.Entries.Count);
                 treeGroups.Nodes.Add(all);
 
                 // Родительская группа в этом порядке всегда идёт раньше своих подгрупп.
@@ -512,7 +512,7 @@ namespace KeyBox.UI
                     nodes[group.Id] = node;
                 }
 
-                TreeNode none = MakeGroupNode(FilterKind.Ungrouped, null, "Без группы", ungrouped);
+                TreeNode none = MakeGroupNode(FilterKind.Ungrouped, null, L.T("Без группы", "No group"), ungrouped);
                 treeGroups.Nodes.Add(none);
 
                 // Ветки раскрыты, кроме тех, что пользователь свернул сам.
@@ -700,24 +700,24 @@ namespace KeyBox.UI
             string text;
             if (Data.Entries.Count == 0)
             {
-                text = "Здесь пока пусто.\nНажмите «Добавить», чтобы создать первую запись.";
+                text = L.T("Здесь пока пусто.\nНажмите «Добавить», чтобы создать первую запись.", "Nothing here yet.\nClick “Add” to create the first entry.");
             }
             else if (txtSearch.Text.Trim().Length > 0)
             {
-                text = "Ничего не найдено.";
+                text = L.T("Ничего не найдено.", "Nothing found.");
             }
             else if (filter.Kind == FilterKind.Ungrouped)
             {
-                text = "Записей без группы нет.";
+                text = L.T("Записей без группы нет.", "There are no entries without a group.");
             }
             else if (Data.CountInBranch(filter.GroupId) > 0)
             {
                 // Группа показывает только свои записи, а здесь все они разложены по подгруппам.
-                text = "В самой группе записей нет — они лежат в её подгруппах.\nВыберите подгруппу слева или воспользуйтесь поиском.";
+                text = L.T("В самой группе записей нет — они лежат в её подгруппах.\nВыберите подгруппу слева или воспользуйтесь поиском.", "This group itself has no entries — they are in its subgroups.\nPick a subgroup on the left or use the search.");
             }
             else
             {
-                text = "В этой группе пока нет записей.\nПеретащите записи на группу в списке слева или нажмите «Добавить».";
+                text = L.T("В этой группе пока нет записей.\nПеретащите записи на группу в списке слева или нажмите «Добавить».", "This group has no entries yet.\nDrag entries onto the group on the left or click “Add”.");
             }
             lblEmpty.Text = text;
             PlaceEmptyLabel();
@@ -739,8 +739,8 @@ namespace KeyBox.UI
         {
             int total = Data.Entries.Count;
             lblCount.Text = shown == total
-                ? "Записей: " + total
-                : string.Format("Показано: {0} из {1}", shown, total);
+                ? L.F("Записей: {0}", "Entries: {0}", total)
+                : L.F("Показано: {0} из {1}", "Showing {0} of {1}", shown, total);
         }
 
         private void UpdateCommands()
@@ -842,7 +842,7 @@ namespace KeyBox.UI
             Color color = SystemColors.ControlText;
             if (dirty)
             {
-                text = "Внимание: последние изменения не записаны в файл";
+                text = L.T("Внимание: последние изменения не записаны в файл", "Warning: the latest changes have not been written to the file");
                 color = Ui.Danger;
             }
             else if (flashSeconds > 0)
@@ -851,7 +851,8 @@ namespace KeyBox.UI
             }
             else if (ClipboardGuard.Pending)
             {
-                text = string.Format("{0} скопирован. Буфер обмена очистится через {1} с",
+                text = L.F("{0} скопирован. Буфер обмена очистится через {1} с",
+                    "{0} copied. The clipboard will be cleared in {1} s",
                     ClipboardGuard.Label, ClipboardGuard.SecondsLeft);
             }
             else
@@ -867,7 +868,7 @@ namespace KeyBox.UI
             if (closing || IsDisposed) return;
             if (e.Kind == ClipboardEvent.Cleared)
             {
-                Flash("Буфер обмена очищен");
+                Flash(L.T("Буфер обмена очищен", "Clipboard cleared"));
                 return;
             }
             if (e.Kind == ClipboardEvent.Copied) flashSeconds = 0;
@@ -911,9 +912,11 @@ namespace KeyBox.UI
                 catch (ObjectDisposedException) { return false; }
 
                 SetDirty(true);
-                bool retry = MsgBox.Retry(this, "Не удалось сохранить",
-                    problem + "\n\nИзменения пока остаются только в памяти программы. " +
-                    "Проверьте, что носитель на месте и доступен для записи, и повторите попытку.");
+                bool retry = MsgBox.Retry(this, L.T("Не удалось сохранить", "Could not save"),
+                    problem + L.T("\n\nИзменения пока остаются только в памяти программы. " +
+                                  "Проверьте, что носитель на месте и доступен для записи, и повторите попытку.",
+                                  "\n\nFor now the changes are kept only in the program's memory. " +
+                                  "Make sure the drive is present and writable, then try again."));
                 if (!retry || closing || LockRequested) return false;
             }
         }
@@ -957,12 +960,12 @@ namespace KeyBox.UI
                 }
                 catch (ValidationException ex)
                 {
-                    MsgBox.Error(this, "Новая запись", ex.Message);
+                    MsgBox.Error(this, L.T("Новая запись", "New entry"), ex.Message);
                     return;
                 }
                 SaveVault();
                 RevealEntry(entry);
-                Flash("Запись добавлена");
+                Flash(L.T("Запись добавлена", "Entry added"));
             }
         }
 
@@ -984,7 +987,7 @@ namespace KeyBox.UI
                 }
                 catch (ValidationException ex)
                 {
-                    MsgBox.Error(this, "Изменение записи", ex.Message);
+                    MsgBox.Error(this, L.T("Изменение записи", "Edit entry"), ex.Message);
                     RefreshAll();
                     return;
                 }
@@ -992,7 +995,7 @@ namespace KeyBox.UI
 
                 SaveVault();
                 RevealEntry(entry);
-                Flash("Запись сохранена");
+                Flash(L.T("Запись сохранена", "Entry saved"));
             }
         }
 
@@ -1005,19 +1008,20 @@ namespace KeyBox.UI
             if (ids.Length == 1)
             {
                 Entry entry = Data.FindEntry(ids[0]);
-                question = "Удалить запись «" + TitleOf(entry) + "»?\n\nВосстановить её будет нельзя.";
+                question = L.F("Удалить запись «{0}»?\n\nВосстановить её будет нельзя.",
+                    "Delete the entry “{0}”?\n\nIt cannot be restored.", TitleOf(entry));
             }
             else
             {
-                question = "Удалить " + Ui.Plural(ids.Length, "выбранную запись", "выбранные записи", "выбранных записей") +
-                           "?\n\nВосстановить их будет нельзя.";
+                question = L.F("Удалить {0}?\n\nВосстановить их будет нельзя.", "Delete {0}?\n\nThey cannot be restored.",
+                    L.Plural(ids.Length, "выбранную запись", "выбранные записи", "выбранных записей", "selected entry", "selected entries"));
             }
-            if (!MsgBox.ConfirmDanger(this, "Удаление", question, "Удалить") || LockRequested) return;
+            if (!MsgBox.ConfirmDanger(this, L.T("Удаление", "Delete"), question, L.T("Удалить", "Delete")) || LockRequested) return;
 
             int removed = Data.DeleteEntries(ids);
             SaveVault();
             RefreshAll();
-            Flash("Удалено: " + Ui.Plural(removed, "запись", "записи", "записей"));
+            Flash(L.F("Удалено: {0}", "Deleted: {0}", L.Plural(removed, "запись", "записи", "записей", "entry", "entries")));
         }
 
         private static string TitleOf(Entry entry)
@@ -1035,16 +1039,18 @@ namespace KeyBox.UI
             Entry entry = Data.FindEntry(ids[0]);
             if (entry == null) return;
 
-            string what = password ? "Пароль" : "Логин";
+            string what = password ? L.T("Пароль", "Password") : L.T("Логин", "Username");
             string value = password ? entry.Password : entry.Login;
             if (string.IsNullOrEmpty(value))
             {
-                Flash(what + " у этой записи не задан");
+                Flash(password
+                    ? L.T("Пароль у этой записи не задан", "This entry has no password")
+                    : L.T("Логин у этой записи не задан", "This entry has no username"));
                 return;
             }
             if (!ClipboardGuard.Copy(value, what, ClipboardClearSeconds))
             {
-                Flash("Не удалось скопировать: буфер обмена занят другой программой");
+                Flash(L.T("Не удалось скопировать: буфер обмена занят другой программой", "Could not copy: the clipboard is in use by another program"));
             }
         }
 
@@ -1059,21 +1065,25 @@ namespace KeyBox.UI
             }
             catch (ValidationException ex)
             {
-                MsgBox.Error(this, "Перемещение", ex.Message);
+                MsgBox.Error(this, L.T("Перемещение", "Move"), ex.Message);
                 RefreshAll();
                 return;
             }
 
             if (moved == 0)
             {
-                Flash(groupId == null ? "Эти записи и так без группы" : "Записи уже в этой группе");
+                Flash(groupId == null
+                    ? L.T("Эти записи и так без группы", "These entries have no group already")
+                    : L.T("Записи уже в этой группе", "The entries are already in this group"));
                 return;
             }
             SaveVault();
             RefreshAll();
 
-            string target = groupId == null ? "в «Без группы»" : "в группу «" + Ui.Shorten(Data.GroupPath(groupId), 60) + "»";
-            Flash("Перемещено " + target + ": " + Ui.Plural(moved, "запись", "записи", "записей"));
+            string count = L.Plural(moved, "запись", "записи", "записей", "entry", "entries");
+            Flash(groupId == null
+                ? L.F("Перемещено в «Без группы»: {0}", "Moved to “No group”: {0}", count)
+                : L.F("Перемещено в группу «{0}»: {1}", "Moved to the group “{0}”: {1}", Ui.Shorten(Data.GroupPath(groupId), 60), count));
         }
 
         private void MoveSelectedToNewGroup()
@@ -1121,13 +1131,13 @@ namespace KeyBox.UI
             }
             if (groups.Count > 0) items.Add(new ToolStripSeparator());
 
-            var none = new ToolStripMenuItem("Без группы");
+            var none = new ToolStripMenuItem(L.T("Без группы", "No group"));
             none.Enabled = !(sameGroup && common == "");
             none.Click += delegate { MoveEntries(SelectedIds(), null); };
             items.Add(none);
 
             items.Add(new ToolStripSeparator());
-            var create = new ToolStripMenuItem("Новая группа…");
+            var create = new ToolStripMenuItem(L.T("Новая группа…", "New group…"));
             create.Click += delegate { MoveSelectedToNewGroup(); };
             items.Add(create);
         }
@@ -1164,7 +1174,7 @@ namespace KeyBox.UI
                 }
                 catch (ValidationException ex)
                 {
-                    MsgBox.Error(this, "Новая группа", ex.Message);
+                    MsgBox.Error(this, L.T("Новая группа", "New group"), ex.Message);
                     return null;
                 }
             }
@@ -1179,7 +1189,7 @@ namespace KeyBox.UI
             SetSearchSilently("");
             filter = GroupFilter.ForGroup(group.Id);
             RefreshAll();
-            Flash("Группа «" + Ui.Shorten(Data.GroupPath(group.Id), 60) + "» создана");
+            Flash(L.F("Группа «{0}» создана", "Group “{0}” created", Ui.Shorten(Data.GroupPath(group.Id), 60)));
         }
 
         /// <summary>Меняет название выбранной группы и её место в дереве.</summary>
@@ -1200,7 +1210,7 @@ namespace KeyBox.UI
                 }
                 catch (ValidationException ex)
                 {
-                    MsgBox.Error(this, "Изменение группы", ex.Message);
+                    MsgBox.Error(this, L.T("Изменение группы", "Edit group"), ex.Message);
                     RefreshAll();
                     return;
                 }
@@ -1209,8 +1219,8 @@ namespace KeyBox.UI
                 SaveVault();
                 RefreshAll();
                 Flash(moved
-                    ? "Группа перенесена: «" + Ui.Shorten(Data.GroupPath(group.Id), 60) + "»"
-                    : "Группа переименована");
+                    ? L.F("Группа перенесена: «{0}»", "Group moved: “{0}”", Ui.Shorten(Data.GroupPath(group.Id), 60))
+                    : L.T("Группа переименована", "Group renamed"));
             }
         }
 
@@ -1224,7 +1234,7 @@ namespace KeyBox.UI
             }
             catch (ValidationException ex)
             {
-                MsgBox.Error(this, "Перенос группы", ex.Message);
+                MsgBox.Error(this, L.T("Перенос группы", "Move group"), ex.Message);
                 RefreshAll();
                 return;
             }
@@ -1232,7 +1242,7 @@ namespace KeyBox.UI
 
             SaveVault();
             RefreshAll();
-            Flash("Группа перенесена: «" + Ui.Shorten(Data.GroupPath(groupId), 60) + "»");
+            Flash(L.F("Группа перенесена: «{0}»", "Group moved: “{0}”", Ui.Shorten(Data.GroupPath(groupId), 60)));
         }
 
         internal void DeleteGroup()
@@ -1245,22 +1255,27 @@ namespace KeyBox.UI
             int entries = Data.CountInBranch(group.Id);
             Group parent = Data.FindGroup(group.ParentId);
 
-            string question = "Удалить группу «" + Ui.Shorten(group.Name, 60) + "»";
-            if (subgroups > 0)
+            string question = L.F("Удалить группу «{0}»", "Delete the group “{0}”", Ui.Shorten(group.Name, 60));
+            if (subgroups == 1)
             {
-                question += subgroups == 1 ? " вместе с её подгруппой" : " вместе с её подгруппами (" + subgroups + ")";
+                question += L.T(" вместе с её подгруппой", " together with its subgroup");
+            }
+            else if (subgroups > 1)
+            {
+                question += L.F(" вместе с её подгруппами ({0})", " together with its subgroups ({0})", subgroups);
             }
             question += "?";
             if (entries > 0)
             {
-                string destination = parent == null
-                    ? "в разделе «Без группы»"
-                    : "в группе «" + Ui.Shorten(parent.Name, 40) + "»";
-                question += "\n\nЗаписи при этом не удаляются: " +
-                            Ui.Plural(entries, "запись", "записи", "записей") + " " +
-                            (entries == 1 ? "окажется" : "окажутся") + " " + destination + ".";
+                string count = L.Plural(entries, "запись", "записи", "записей", "entry", "entries");
+                string verb = entries == 1 ? L.T("окажется", "will move") : L.T("окажутся", "will move");
+                question += "\n\n" + (parent == null
+                    ? L.F("Записи при этом не удаляются: {0} {1} в разделе «Без группы».",
+                          "The entries are not deleted: {0} {1} to “No group”.", count, verb)
+                    : L.F("Записи при этом не удаляются: {0} {1} в группе «{2}».",
+                          "The entries are not deleted: {0} {1} to the group “{2}”.", count, verb, Ui.Shorten(parent.Name, 40)));
             }
-            if (!MsgBox.ConfirmDanger(this, "Удаление группы", question, "Удалить группу") || LockRequested) return;
+            if (!MsgBox.ConfirmDanger(this, L.T("Удаление группы", "Delete group"), question, L.T("Удалить группу", "Delete group")) || LockRequested) return;
 
             try
             {
@@ -1268,7 +1283,7 @@ namespace KeyBox.UI
             }
             catch (ValidationException ex)
             {
-                MsgBox.Error(this, "Удаление группы", ex.Message);
+                MsgBox.Error(this, L.T("Удаление группы", "Delete group"), ex.Message);
                 RefreshAll();
                 return;
             }
@@ -1278,7 +1293,7 @@ namespace KeyBox.UI
             if (parent != null) filter = GroupFilter.ForGroup(parent.Id);
             else filter = entries > 0 ? GroupFilter.Ungrouped : GroupFilter.All;
             RefreshAll();
-            Flash("Группа удалена");
+            Flash(L.T("Группа удалена", "Group deleted"));
         }
 
         // =====================================================================
@@ -1351,21 +1366,31 @@ namespace KeyBox.UI
                 if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return;
             }
             SetDirty(false);
-            Flash("Мастер-пароль изменён");
+            Flash(L.T("Мастер-пароль изменён", "Master password changed"));
         }
 
         private void ShowAbout()
         {
-            string text =
-                Program.AppName + " " + Program.Version + " — портативное хранилище паролей\n\n" +
-                "Файл хранилища:\n" + Ui.FitPath(session.FilePath, Ui.Font, MsgBox.TextWidth) + "\n\n" +
-                "Шифрование: AES-256-GCM. Ключ получается из мастер-пароля функцией PBKDF2-HMAC-SHA512 (" +
-                session.Iterations.ToString("N0") + " итераций).\n\n" +
-                "В хранилище: " + Ui.Plural(Data.Groups.Count, "группа", "группы", "групп") + ", " +
-                Ui.Plural(Data.Entries.Count, "запись", "записи", "записей") + ".\n\n" +
-                "Блокировка — через " + AutoLockMinutes + " мин бездействия, а также при блокировке Windows. " +
-                "Буфер обмена очищается через " + ClipboardClearSeconds + " с после копирования.";
-            MsgBox.Info(this, "О программе", text);
+            string text = L.F(
+                "{0} {1} — портативное хранилище паролей\n\n" +
+                "Файл хранилища:\n{2}\n\n" +
+                "Шифрование: AES-256-GCM. Ключ получается из мастер-пароля функцией PBKDF2-HMAC-SHA512 ({3} итераций).\n\n" +
+                "В хранилище: {4}, {5}.\n\n" +
+                "Блокировка — через {6} мин бездействия, а также при блокировке Windows. " +
+                "Буфер обмена очищается через {7} с после копирования.",
+                "{0} {1} — a portable password vault\n\n" +
+                "Vault file:\n{2}\n\n" +
+                "Encryption: AES-256-GCM. The key is derived from the master password with PBKDF2-HMAC-SHA512 ({3} iterations).\n\n" +
+                "In the vault: {4}, {5}.\n\n" +
+                "Auto-lock after {6} min of inactivity and when Windows is locked. " +
+                "The clipboard is cleared {7} s after copying.",
+                Program.AppName, Program.Version,
+                Ui.FitPath(session.FilePath, Ui.Font, MsgBox.TextWidth),
+                session.Iterations.ToString("N0"),
+                L.Plural(Data.Groups.Count, "группа", "группы", "групп", "group", "groups"),
+                L.Plural(Data.Entries.Count, "запись", "записи", "записей", "entry", "entries"),
+                AutoLockMinutes, ClipboardClearSeconds);
+            MsgBox.Info(this, L.T("О программе", "About"), text);
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -1647,8 +1672,10 @@ namespace KeyBox.UI
             if (!LockRequested && dirty && e.CloseReason == CloseReason.UserClosing)
             {
                 if (!SaveVault() &&
-                    !MsgBox.ConfirmDanger(this, "Выход без сохранения",
-                        "Последние изменения не записаны в файл и будут потеряны.\n\nВсё равно выйти?", "Выйти"))
+                    !MsgBox.ConfirmDanger(this, L.T("Выход без сохранения", "Exit without saving"),
+                        L.T("Последние изменения не записаны в файл и будут потеряны.\n\nВсё равно выйти?",
+                            "The latest changes have not been written to the file and will be lost.\n\nExit anyway?"),
+                        L.T("Выйти", "Exit")))
                 {
                     e.Cancel = true;
                 }

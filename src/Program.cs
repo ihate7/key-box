@@ -122,10 +122,14 @@ namespace KeyBox
             if (File.Exists(vaultPath) || !File.Exists(backup)) return true;
 
             bool restore = MsgBox.Confirm(null, AppName,
-                "Файл хранилища не найден:\n" + Ui.FitPath(vaultPath, Ui.Font, MsgBox.TextWidth) + "\n\n" +
-                "Но рядом лежит его резервная копия — предыдущая сохранённая версия. Восстановить хранилище из неё?\n\n" +
-                "Если нужно начать с пустого хранилища, выйдите и удалите файл копии «" + Path.GetFileName(backup) + "».",
-                "Восстановить", "Выход");
+                L.F("Файл хранилища не найден:\n{0}\n\n" +
+                    "Но рядом лежит его резервная копия — предыдущая сохранённая версия. Восстановить хранилище из неё?\n\n" +
+                    "Если нужно начать с пустого хранилища, выйдите и удалите файл копии «{1}».",
+                    "The vault file was not found:\n{0}\n\n" +
+                    "But its backup copy — the previously saved version — is next to it. Restore the vault from it?\n\n" +
+                    "To start with an empty vault instead, exit and delete the backup file “{1}”.",
+                    Ui.FitPath(vaultPath, Ui.Font, MsgBox.TextWidth), Path.GetFileName(backup)),
+                L.T("Восстановить", "Restore"), L.T("Выход", "Exit"));
             if (!restore) return false;
 
             try
@@ -135,18 +139,18 @@ namespace KeyBox
             }
             catch (IOException ex)
             {
-                MsgBox.Error(null, AppName, "Не удалось восстановить хранилище.\n\n" + ex.Message);
+                MsgBox.Error(null, AppName, L.T("Не удалось восстановить хранилище.\n\n", "Could not restore the vault.\n\n") + ex.Message);
             }
             catch (UnauthorizedAccessException ex)
             {
-                MsgBox.Error(null, AppName, "Не удалось восстановить хранилище.\n\n" + ex.Message);
+                MsgBox.Error(null, AppName, L.T("Не удалось восстановить хранилище.\n\n", "Could not restore the vault.\n\n") + ex.Message);
             }
             return false;
         }
 
         private static int BadPath(Exception ex)
         {
-            MsgBox.Error(null, AppName, "Не удалось определить путь к файлу хранилища.\n\n" + ex.Message);
+            MsgBox.Error(null, AppName, L.T("Не удалось определить путь к файлу хранилища.\n\n", "Could not determine the path of the vault file.\n\n") + ex.Message);
             return 2;
         }
 
@@ -162,10 +166,10 @@ namespace KeyBox
 
         private static void ReportFailure(Exception ex)
         {
-            string details = ex == null ? "Неизвестная ошибка." : ex.GetType().Name + ": " + ex.Message;
+            string details = ex == null ? L.T("Неизвестная ошибка.", "Unknown error.") : ex.GetType().Name + ": " + ex.Message;
             MessageBox.Show(
-                "В программе произошла непредвиденная ошибка.\n\n" + details +
-                "\n\nЕсли она повторяется, перезапустите программу.",
+                L.T("В программе произошла непредвиденная ошибка.\n\n", "An unexpected error occurred.\n\n") + details +
+                L.T("\n\nЕсли она повторяется, перезапустите программу.", "\n\nIf it keeps happening, restart the program."),
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }

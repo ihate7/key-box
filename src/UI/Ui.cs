@@ -284,7 +284,7 @@ namespace KeyBox.UI
             toggle.TextAlign = ContentAlignment.MiddleCenter;
             toggle.UseVisualStyleBackColor = true;
             toggle.Margin = new Padding(S(6), 0, 0, 0);
-            toggle.AccessibleName = "Показать пароль";
+            toggle.AccessibleName = L.T("Показать пароль", "Show password");
             if (HasGlyphs)
             {
                 toggle.Font = GlyphFont;
@@ -294,7 +294,7 @@ namespace KeyBox.UI
             }
             else
             {
-                toggle.Text = "Показать";
+                toggle.Text = L.T("Показать", "Show");
                 toggle.AutoSize = true;
             }
             return toggle;
@@ -354,24 +354,6 @@ namespace KeyBox.UI
         private static int TextWidth(string text, Font font)
         {
             return TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
-        }
-
-        /// <summary>Русское склонение по числу: 1 запись, 2 записи, 5 записей.</summary>
-        public static string Plural(int count, string one, string few, string many)
-        {
-            int n = Math.Abs(count) % 100;
-            int last = n % 10;
-            string word;
-            if (n >= 11 && n <= 14) word = many;
-            else if (last == 1) word = one;
-            else if (last >= 2 && last <= 4) word = few;
-            else word = many;
-            return count + " " + word;
-        }
-
-        public static string FormatTime(DateTime local)
-        {
-            return local.ToString("dd.MM.yyyy HH:mm");
         }
 
         private static Font TryFont(string family, float size, Font fallback)
