@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using KeyBox.Crypto;
@@ -114,6 +115,7 @@ namespace KeyBox.UI
         private int sinceFileCheck;
         private bool exiting;
         private bool dragging;
+        private bool probing;
 
         public MainForm(VaultSession session)
         {
@@ -1048,7 +1050,7 @@ namespace KeyBox.UI
             if (FileCheckSeconds > 0 && ++sinceFileCheck >= FileCheckSeconds)
             {
                 sinceFileCheck = 0;
-                CheckFile();
+                ProbeFile();
             }
             if (settings.AutoLockMinutes > 0 && idle.IdleSeconds >= AutoLockSeconds)
             {
@@ -1115,6 +1117,30 @@ namespace KeyBox.UI
             }
             catch (System.Security.Cryptography.CryptographicException) { return false; }
             catch (ObjectDisposedException) { return false; }
+        }
+
+        /// <summary>
+        /// Периодическая проверка по таймеру. Сначала в фоновом потоке выясняется, изменился ли файл
+        /// вообще: если сетевой диск перестал отвечать, такой вопрос может повиснуть надолго, и окно
+        /// при этом замирать не должно. Читается файл, только если он действительно изменился.
+        /// </summary>
+        private async void ProbeFile()
+        {
+            if (probing || closing || LockRequested) return;
+            probing = true;
+            bool changed = false;
+            try
+            {
+                VaultSession current = session;
+                changed = await Task.Run<bool>(delegate { return current.FileLooksChanged(); });
+            }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+            finally
+            {
+                probing = false;
+            }
+            if (changed && !IsDisposed) CheckFile();
         }
 
         /// <summary>

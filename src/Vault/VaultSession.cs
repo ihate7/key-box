@@ -499,13 +499,38 @@ namespace KeyBox.Vault
             catch (SecurityException) { seenLength = -1; }
         }
 
-        /// <summary>Быстрая проверка без чтения файла: изменились ли его размер или время записи.</summary>
+        /// <summary>
+        /// Быстрая проверка без чтения файла: изменились ли его размер или время записи с тех пор,
+        /// как сессия видела его в последний раз. Вызывается из фонового потока: на сетевом диске,
+        /// который перестал отвечать, такой вопрос может повиснуть надолго, и ждать ответа в потоке
+        /// окна нельзя. Поэтому и блокировка сессии на время обращения к диску не удерживается.
+        /// </summary>
+        public bool FileLooksChanged()
+        {
+            string path;
+            long length;
+            DateTime time;
+            lock (sync)
+            {
+                if (disposed) return false;
+                path = FilePath;
+                length = seenLength;
+                time = seenTime;
+            }
+            return LooksChanged(path, length, time);
+        }
+
         private bool LooksChanged()
+        {
+            return LooksChanged(FilePath, seenLength, seenTime);
+        }
+
+        private static bool LooksChanged(string path, long length, DateTime time)
         {
             try
             {
-                var info = new FileInfo(FilePath);
-                return info.Exists && (info.Length != seenLength || info.LastWriteTimeUtc != seenTime);
+                var info = new FileInfo(path);
+                return info.Exists && (info.Length != length || info.LastWriteTimeUtc != time);
             }
             catch (IOException) { return false; }
             catch (UnauthorizedAccessException) { return false; }
