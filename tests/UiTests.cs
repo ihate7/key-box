@@ -135,6 +135,7 @@ namespace KeyBox.Tests
             Run("previous passwords of an entry", PasswordHistory);
             Run("settings: stored in the vault and applied at once", Settings);
             Run("auto-type: sequence, safety checks, messages", AutoTyping);
+            Run("import from a browser file and export", ImportAndExport);
             if (Array.IndexOf(args, "--real-input") >= 0)
             {
                 Run("auto-type: real keystrokes reach a window", RealAutoType);
@@ -1567,6 +1568,177 @@ namespace KeyBox.Tests
             }
         }
 
+        /// <summary>
+        /// Импорт и экспорт. Окна выбора файла подменены: путь задаёт тест. Файлы лежат только
+        /// в рабочей папке теста и в конце удаляются; импортированное из хранилища убирается.
+        /// </summary>
+        private static void ImportAndExport()
+        {
+            var withMark = new UTF8Encoding(true);
+            string source = Path.Combine(workDir, "browser-export.csv");
+            string exportedCsv = Path.Combine(workDir, "keybox-export.csv");
+            string exportedJson = Path.Combine(workDir, "keybox-export.json");
+            string group = "Импорт " + DateTime.Now.ToString("yyyy-MM-dd");
+            string picked = source;
+
+            File.WriteAllText(source,
+                "name,url,username,password,note\r\n" +
+                "Форум,https://forum.example.com,ivan,forum-pass-1,\r\n" +
+                "Магазин,shop.example.com,ivan@example.com,\"shop,pass\",\"карта не привязана\"\r\n" +
+                ",,,,\r\n", withMark);
+
+            Ui.FilePicker = delegate(bool save, string suggested) { return picked; };
+            try
+            {
+                // Импорт: вопрос, затем итог с напоминанием удалить файл.
+                DriveMany<MsgBox>(delegate { ClickTool("toolbar", "miImport"); },
+                    delegate(MsgBox box)
+                    {
+                        string text = Find<Label>(box, "lblText").Text;
+                        Check(text.Contains("найдено: 2 записи") && text.Contains("Пропущено") && text.Contains(group), "the question: " + text);
+                        Click(box, "btnOk");
+                    },
+                    delegate(MsgBox box)
+                    {
+                        string text = Find<Label>(box, "lblText").Text;
+                        Check(text.Contains("Импортировано: 2 записи") && text.Contains("browser-export.csv") && text.Contains("удалите"), "the result: " + text);
+                        Shot(box, "33-import-done");
+                        Click(box, "btnOk");
+                    });
+
+                Check(SelectedGroup() == group && Titles().Length == 2, "the import group is opened: " + SelectedGroup());
+                Entry shop = FindEntry("Магазин\nкарта не привязана");
+                Check(shop != null && shop.Password == "shop,pass" && shop.Url == "shop.example.com" && shop.Login == "ivan@example.com", "fields are imported");
+                Check(session.Data.LiveCount == 9 && session.Data.Groups.Count == 3, "two entries and one group are added");
+                using (VaultSession copy = VaultSession.Open(vaultPath, MasterPassword))
+                {
+                    Check(copy.Data.LiveCount == 9, "and saved to the file");
+                }
+
+                // Файл, в котором нет списка паролей.
+                File.WriteAllText(source, "это не список паролей\r\nа просто текст\r\n", withMark);
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miImport"); }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("Не удалось понять столбцы"), "a foreign file is explained: " + Find<Label>(box, "lblText").Text);
+                    Click(box, "btnOk");
+                });
+
+                // Отмена в окне выбора файла.
+                picked = null;
+                ClickTool("toolbar", "miImport");
+                Check(session.Data.LiveCount == 9, "cancelling the file choice does nothing");
+
+                // Экспорт в CSV: предупреждение, в котором по умолчанию выбрана «Отмена».
+                picked = exportedCsv;
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miExport"); }, delegate(MsgBox box)
+                {
+                    Check(Find<Label>(box, "lblText").Text.Contains("не будет зашифрован") && box.ActiveControl == Find<Button>(box, "btnCancel"),
+                        "a warning with 'cancel' by default");
+                    Shot(box, "34-export-warning");
+                    Click(box, "btnCancel");
+                });
+                Check(!File.Exists(exportedCsv), "refusing the warning writes nothing");
+
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miExport"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+                byte[] raw = File.ReadAllBytes(exportedCsv);
+                Check(raw.Length > 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF, "the file starts with a byte order mark (for Excel)");
+                ImportPlan plan = VaultTransfer.ReadCsv(File.ReadAllText(exportedCsv, Encoding.UTF8));
+                Check(plan.Error == null && plan.Entries.Count == 9, "the exported file reads back: " + plan.Entries.Count);
+                Check(StatusText("lblMessage").Contains("Экспортировано: 9 записей") && StatusText("lblMessage").Contains("keybox-export.csv"),
+                    "status: " + StatusText("lblMessage"));
+
+                // Экспорт в JSON.
+                picked = exportedJson;
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miExport"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+                string json = File.ReadAllText(exportedJson, Encoding.UTF8);
+                Check(json.Contains("\"entries\"") && json.Contains("forum-pass-1") && json.Contains("\"groups\""), "the json export has everything in plain text");
+            }
+            finally
+            {
+                Ui.FilePicker = null;
+                foreach (string file in new[] { source, exportedCsv, exportedJson })
+                {
+                    if (File.Exists(file)) File.Delete(file);
+                }
+            }
+
+            // Убираем импортированное.
+            SelectGroup(group);
+            SelectEntries("Форум", "Магазин карта не привязана");
+            DeleteSelectedForever();
+            SelectGroup(group);
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            Check(session.Data.Groups.Count == 2 && session.Data.Entries.Count == 7, "the vault is back to its previous shape");
+        }
+
+        /// <summary>
+        /// Как Drive, но для нескольких диалогов одного типа, которые одно действие показывает
+        /// друг за другом: первый сценарий получает первый диалог, второй — следующий и так далее.
+        /// </summary>
+        private static void DriveMany<T>(Action open, params Action<T>[] scripts) where T : Form
+        {
+            Exception error = null;
+            int next = 0;
+
+            var timer = new FormsTimer();
+            timer.Interval = 25;
+            timer.Tick += delegate
+            {
+                if (next >= scripts.Length) return;
+
+                T dialog = null;
+                FormCollection forms = Application.OpenForms;
+                for (int i = forms.Count - 1; i >= 0; i--)
+                {
+                    T candidate = forms[i] as T;
+                    if (candidate != null && candidate.Visible && !driven.Contains(candidate))
+                    {
+                        dialog = candidate;
+                        break;
+                    }
+                }
+                if (dialog == null) return;
+
+                timer.Stop();
+                driven.Add(dialog);
+                Action<T> script = scripts[next++];
+                try
+                {
+                    Pump(40);
+                    script(dialog);
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                    next = scripts.Length;
+                }
+                finally
+                {
+                    if (!dialog.IsDisposed && dialog.Visible && dialog.DialogResult == DialogResult.None)
+                    {
+                        dialog.DialogResult = DialogResult.Cancel;
+                        dialog.Close();
+                    }
+                    if (next < scripts.Length) timer.Start();
+                }
+            };
+
+            timer.Start();
+            try
+            {
+                open();
+            }
+            finally
+            {
+                timer.Stop();
+                timer.Dispose();
+            }
+
+            if (error != null) throw new Exception(error.Message, error);
+            if (next < scripts.Length) throw new Exception("only " + next + " of " + scripts.Length + " dialogs of type " + typeof(T).Name + " appeared");
+            Pump(40);
+        }
+
         private static List<Label> AllLabels(Control root)
         {
             var labels = new List<Label>();
@@ -2317,6 +2489,13 @@ namespace KeyBox.Tests
                     Find<CheckBox>(f, "chkLower").Checked = true;
                     Shot(f, "en-05-settings");
                     Click(f, "btnCancel");
+                });
+
+                Drive<MsgBox>(delegate { ClickTool("toolbar", "miExport"); }, delegate(MsgBox box)
+                {
+                    CheckEnglish(box);
+                    Check(Find<Label>(box, "lblText").Text.Contains("will not be encrypted"), "the export warning: " + Find<Label>(box, "lblText").Text);
+                    Click(box, "btnCancel");
                 });
 
                 // Меню «переместить» и сообщение о перемещении.

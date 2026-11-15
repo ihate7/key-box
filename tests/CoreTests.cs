@@ -77,6 +77,10 @@ namespace KeyBox.Tests
             Run("model: trash", ModelTrash);
             Run("model: settings", ModelSettings);
             Run("model: structure version 3 only when it is needed", ModelVersion3);
+            Run("csv: quotes, separators, line breaks", CsvParsing);
+            Run("import: files of browsers and password managers", ImportFormats);
+            Run("import: groups, one-time codes, odd rows", ImportIntoVault);
+            Run("export: csv that reads back without losses", ExportRoundTrip);
             Run("json: unicode and special characters", JsonSpecialCharacters);
             Run("json: damaged and foreign data", JsonNormalisation);
             Run("localisation: plural forms, dates, language choice", LocalisationBasics);
@@ -1415,6 +1419,179 @@ namespace KeyBox.Tests
             Check(first.Url == null && first.Totp == null && first.History == null && !first.IsDeleted && old.Settings == null && old.Removed == null,
                 "the new fields are simply absent in an old file");
             Check(old.LiveCount == 1 && old.EffectiveSettings.AutoLockMinutes == 5, "an old file works with the defaults");
+        }
+
+        // ---------- Импорт и экспорт ----------
+
+        private static void CsvParsing()
+        {
+            List<string[]> rows = Csv.Parse("a,b,c\r\n1,\"two, with comma\",\"quote \"\"inside\"\"\"\r\n\"multi\nline\",,last\n");
+            Check(rows.Count == 3 && rows[0].Length == 3 && rows[1].Length == 3 && rows[2].Length == 3, "three rows of three fields");
+            Check(rows[1][1] == "two, with comma" && rows[1][2] == "quote \"inside\"", "commas and quotes inside quoted fields");
+            Check(rows[2][0] == "multi\nline" && rows[2][1] == "" && rows[2][2] == "last", "a line break inside a field, an empty field");
+
+            rows = Csv.Parse((char)0xFEFF + "name;password\r\n\r\nx;y\r\n\r\n");
+            Check(rows.Count == 2 && rows[0][0] == "name" && rows[1][1] == "y", "byte order mark, blank lines, semicolons");
+
+            rows = Csv.Parse("name\tpassword\nx\t\"a,b\"");
+            Check(rows.Count == 2 && rows[1][1] == "a,b", "tabs, no line break at the end");
+
+            rows = Csv.Parse("a,b\n\"\",\"\"\n");
+            Check(rows.Count == 2 && rows[1].Length == 2 && rows[1][0] == "" && rows[1][1] == "", "quoted empty fields make a row");
+            Check(Csv.Parse("").Count == 0 && Csv.Parse(null).Count == 0, "empty input");
+
+            var original = new List<string[]>();
+            original.Add(new[] { "plain", "with, comma", "with \"quotes\"", "multi\r\nline", " padded ", "", "semi;colon", "кириллица" });
+            List<string[]> back = Csv.Parse(Csv.Write(original));
+            Check(back.Count == 1 && back[0].Length == original[0].Length, "written rows read back");
+            for (int i = 0; i < original[0].Length; i++)
+            {
+                Check(back[0][i] == original[0][i], "field " + i + " survives: [" + back[0][i] + "]");
+            }
+        }
+
+        private static void ImportFormats()
+        {
+            // Chrome и Edge.
+            ImportPlan chrome = VaultTransfer.ReadCsv(
+                "name,url,username,password,note\r\n" +
+                "example.com,https://example.com/login,alice,pa55,\"first line\nsecond line\"\r\n" +
+                ",,,,\r\n" +
+                "shop,https://shop.example/,bob,\"p,w\",\r\n");
+            Check(chrome.Error == null && chrome.Entries.Count == 2 && chrome.Skipped == 1, "chrome: two entries, one empty line skipped");
+            Check(chrome.Entries[0].Title == "example.com" && chrome.Entries[0].Url == "https://example.com/login" &&
+                  chrome.Entries[0].Login == "alice" && chrome.Entries[0].Password == "pa55" && chrome.Entries[0].Notes == "first line\nsecond line",
+                "chrome: fields of the first entry");
+            Check(chrome.Entries[1].Password == "p,w" && chrome.Entries[1].Notes == "", "chrome: a comma inside a password");
+
+            // Firefox: названия нет, много служебных столбцов.
+            ImportPlan firefox = VaultTransfer.ReadCsv(
+                "\"url\",\"username\",\"password\",\"httpRealm\",\"formActionOrigin\",\"guid\",\"timeCreated\",\"timeLastUsed\",\"timePasswordChanged\"\n" +
+                "\"https://mail.example.org\",\"carol\",\"s3cret\",,\"https://mail.example.org\",\"{6f2a}\",\"1700000000000\",\"1700000000000\",\"1700000000000\"\n");
+            Check(firefox.Error == null && firefox.Entries.Count == 1, "firefox: one entry");
+            Check(firefox.Entries[0].Title == "" && firefox.Entries[0].Url == "https://mail.example.org" && firefox.Entries[0].Login == "carol" &&
+                  firefox.Entries[0].Password == "s3cret", "firefox: fields");
+
+            // Bitwarden: папка, одноразовый код, защищённая заметка без пароля.
+            ImportPlan bitwarden = VaultTransfer.ReadCsv(
+                "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n" +
+                "Social,1,login,Twitter,,,0,twitter.com,me@example.com,password123,JBSWY3DPEHPK3PXP\n" +
+                ",,note,Secure Note Name,the note text,,,,,,\n");
+            Check(bitwarden.Error == null && bitwarden.Entries.Count == 2, "bitwarden: two entries");
+            Check(bitwarden.Entries[0].Group == "Social" && bitwarden.Entries[0].Title == "Twitter" && bitwarden.Entries[0].Url == "twitter.com" &&
+                  bitwarden.Entries[0].Login == "me@example.com" && bitwarden.Entries[0].Password == "password123" &&
+                  bitwarden.Entries[0].Totp == "JBSWY3DPEHPK3PXP", "bitwarden: login");
+            Check(bitwarden.Entries[1].Title == "Secure Note Name" && bitwarden.Entries[1].Notes == "the note text" && bitwarden.Entries[1].Password == "",
+                "bitwarden: note");
+
+            // KeePassXC: группа путём, заголовки с прописной буквы.
+            ImportPlan keepass = VaultTransfer.ReadCsv(
+                "\"Group\",\"Title\",\"Username\",\"Password\",\"URL\",\"Notes\",\"TOTP\",\"Icon\",\"Last Modified\",\"Created\"\n" +
+                "\"Passwords/Internet\",\"Forum\",\"dave\",\"pw\",\"https://forum.example\",\"\",\"\",\"0\",\"2026-01-01T00:00:00Z\",\"2026-01-01T00:00:00Z\"\n");
+            Check(keepass.Error == null && keepass.Entries.Count == 1 && keepass.Entries[0].Group == "Passwords/Internet" &&
+                  keepass.Entries[0].Title == "Forum" && keepass.Entries[0].Login == "dave" && keepass.Entries[0].Url == "https://forum.example",
+                "keepassxc: fields");
+
+            // Непонятные файлы не импортируются вовсе.
+            Check(VaultTransfer.ReadCsv("").Error != null, "an empty file");
+            Check(VaultTransfer.ReadCsv("just some text\nmore text").Error != null, "a file without a password column");
+            Check(VaultTransfer.ReadCsv("password\nonly").Error != null, "a password column alone is not enough");
+            ImportPlan headerOnly = VaultTransfer.ReadCsv("name,password\n");
+            Check(headerOnly.Error == null && headerOnly.Entries.Count == 0, "a header without rows is an empty list, not an error");
+
+            ImportPlan tooLong = VaultTransfer.ReadCsv("name,password\nok,short\nbad," + new string('x', VaultData.MaxPasswordLength + 1) + "\n");
+            Check(tooLong.Entries.Count == 1 && tooLong.Skipped == 1, "an impossible password is skipped, not cut");
+        }
+
+        private static void ImportIntoVault()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            data.AddGroup("Импорт");
+            Entry own = data.AddEntry(null, "mine", "p", "Своя запись");
+
+            ImportPlan plan = VaultTransfer.ReadCsv(
+                "name,url,username,password,note,group,totp\n" +
+                "Почта,mail.example.com,alice,pw1,заметка,Работа/Серверы,JBSWY3DPEHPK3PXP\n" +
+                "Форум,,bob,pw2,,Работа,не ключ\n" +
+                ",https://shop.example.com/cart,,pw3,,,\n" +
+                "Глубоко,,deep,pw4,,a/b/c/d/e/f/g/h/i/j,\n" +
+                "Без группы,,carol,pw5,,,\n");
+            Check(plan.Error == null && plan.Entries.Count == 5, "five rows are read");
+
+            ImportResult result = VaultTransfer.Import(data, plan, "Импорт");
+            Check(result.Entries == 5 && result.Root.Name == "Импорт (2)" && result.Root.ParentId == null, "a new top-level group with a free name: " + result.Root.Name);
+            Check(result.Groups == 9, "subgroups are created from the paths: " + result.Groups);
+
+            Func<string, Entry> byPassword = delegate(string password)
+            {
+                foreach (Entry entry in data.Entries)
+                {
+                    if (entry.Password == password) return entry;
+                }
+                return null;
+            };
+
+            Entry mail = byPassword("pw1");
+            Check(data.GroupPath(mail.GroupId) == "Импорт (2) / Работа / Серверы", "nested group: " + data.GroupPath(mail.GroupId));
+            Check(mail.Description == "Почта\nзаметка" && mail.Url == "mail.example.com" && mail.Login == "alice" && mail.Totp == "JBSWY3DPEHPK3PXP",
+                "title and note become the description, the key is kept");
+
+            Entry forum = byPassword("pw2");
+            Check(data.GroupPath(forum.GroupId) == "Импорт (2) / Работа" && forum.Totp == null && forum.Description == "Форум\nTOTP: не ключ",
+                "a key that cannot be read is kept in the description: " + forum.Description);
+
+            Entry shop = byPassword("pw3");
+            Check(shop.Description == "shop.example.com" && shop.GroupId == result.Root.Id && shop.Url == "https://shop.example.com/cart",
+                "an entry without a name is named after its website: " + shop.Description);
+
+            Entry deep = byPassword("pw4");
+            Check(data.DepthOf(deep.GroupId) == VaultData.MaxGroupDepth, "nesting is cut at the allowed depth: " + data.DepthOf(deep.GroupId));
+            Check(byPassword("pw5").GroupId == result.Root.Id, "entries without a group go to the import group itself");
+
+            Check(data.FindEntry(own.Id) != null && own.GroupId == null && data.LiveCount == 6, "existing entries are untouched");
+
+            ImportResult again = VaultTransfer.Import(data, plan, "Импорт");
+            Check(again.Root.Name == "Импорт (3)" && data.LiveCount == 11, "a second import gets its own group: " + again.Root.Name);
+        }
+
+        private static void ExportRoundTrip()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            Group servers = data.AddGroup("Серверы", work.Id);
+
+            var fields = new EntryFields();
+            fields.GroupId = servers.Id;
+            fields.Login = "alice";
+            fields.Password = "p,\"q\" ;";
+            fields.Description = "Почта\nвторая строка\nтретья";
+            fields.Url = "https://mail.example.com";
+            fields.Totp = "JBSWY3DPEHPK3PXP";
+            data.AddEntry(fields);
+            data.AddEntry(null, "bob", " пробелы ", "Без группы");
+            Entry trashed = data.AddEntry(null, "gone", "x", "Удалённая");
+            data.TrashEntries(new[] { trashed.Id });
+
+            string csv = VaultTransfer.ToCsv(data);
+            Check(csv.StartsWith("name,url,username,password,note,group,totp\r\n"), "header: " + csv.Substring(0, Math.Min(60, csv.Length)));
+            Check(!csv.Contains("Удалённая"), "the trash is not exported");
+
+            ImportPlan plan = VaultTransfer.ReadCsv(csv);
+            Check(plan.Error == null && plan.Entries.Count == 2 && plan.Skipped == 0, "the exported file is read back");
+
+            VaultData copy = VaultData.CreateEmpty();
+            VaultTransfer.Import(copy, plan, "Импорт");
+            Entry mail = null;
+            Entry bob = null;
+            foreach (Entry entry in copy.Entries)
+            {
+                if (entry.Login == "alice") mail = entry;
+                if (entry.Login == "bob") bob = entry;
+            }
+            Check(mail != null && mail.Password == "p,\"q\" ;" && mail.Description == "Почта\nвторая строка\nтретья", "password and description survive");
+            Check(mail.Url == "https://mail.example.com" && mail.Totp == "JBSWY3DPEHPK3PXP", "website and key survive");
+            Check(copy.GroupPath(mail.GroupId) == "Импорт / Работа / Серверы", "the group path survives: " + copy.GroupPath(mail.GroupId));
+            Check(bob != null && bob.Password == " пробелы " && bob.Description == "Без группы", "spaces in a password survive");
         }
 
         // ---------- Язык интерфейса ----------

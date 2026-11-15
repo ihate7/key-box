@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO;
+using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using KeyBox.Crypto;
@@ -23,6 +25,9 @@ namespace KeyBox.UI
 
         /// <summary>Через сколько секунд скопированный логин или пароль стирается из буфера обмена.</summary>
         public const int ClipboardClearSeconds = 30;
+
+        /// <summary>Файл для импорта крупнее этого размера явно не список паролей.</summary>
+        private const int MaxImportFileSize = 32 * 1024 * 1024;
 
         private const string DragFormat = "KeyBox.EntryIds";
         private const string GroupDragFormat = "KeyBox.GroupId";
@@ -213,12 +218,18 @@ namespace KeyBox.UI
             // добавляются справа налево.
             btnMore = new ToolStripDropDownButton(L.T("Ещё", "More"));
             btnMore.Name = "btnMore";
-            StyleToolItem(btnMore, Ui.GlyphMore, L.T("Настройки, смена мастер-пароля, сведения о программе", "Settings, master password, about the program"), false);
+            StyleToolItem(btnMore, Ui.GlyphMore, L.T("Настройки, мастер-пароль, импорт и экспорт, сведения о программе", "Settings, master password, import and export, about the program"), false);
             btnMore.Alignment = ToolStripItemAlignment.Right;
             btnMore.ShowDropDownArrow = false;
             var miSettings = new ToolStripMenuItem(L.T("Настройки…", "Settings…"));
             miSettings.Name = "miSettings";
             miSettings.Click += delegate { ShowSettings(); };
+            var miImport = new ToolStripMenuItem(L.T("Импорт из файла CSV…", "Import from a CSV file…"));
+            miImport.Name = "miImport";
+            miImport.Click += delegate { ImportEntries(); };
+            var miExport = new ToolStripMenuItem(L.T("Экспорт в файл…", "Export to a file…"));
+            miExport.Name = "miExport";
+            miExport.Click += delegate { ExportEntries(); };
             var miChangePassword = new ToolStripMenuItem(L.T("Сменить мастер-пароль…", "Change master password…"));
             miChangePassword.Name = "miChangePassword";
             miChangePassword.Click += delegate { ChangeMasterPassword(); };
@@ -228,6 +239,9 @@ namespace KeyBox.UI
             StyleMenu(btnMore.DropDown);
             btnMore.DropDownItems.Add(miSettings);
             btnMore.DropDownItems.Add(miChangePassword);
+            btnMore.DropDownItems.Add(new ToolStripSeparator());
+            btnMore.DropDownItems.Add(miImport);
+            btnMore.DropDownItems.Add(miExport);
             btnMore.DropDownItems.Add(new ToolStripSeparator());
             btnMore.DropDownItems.Add(miAbout);
 
@@ -1685,6 +1699,148 @@ namespace KeyBox.UI
             }
             SetDirty(false);
             Flash(L.T("Мастер-пароль изменён", "Master password changed"));
+        }
+
+        /// <summary>
+        /// Импорт записей из CSV-файла, который выгрузил браузер или другой менеджер паролей.
+        /// Всё импортированное складывается в новую группу — существующие записи не затрагиваются.
+        /// </summary>
+        internal void ImportEntries()
+        {
+            string title = L.T("Импорт", "Import");
+            string path = Ui.PickFile(this, false, L.T("Импорт из файла CSV", "Import from a CSV file"),
+                L.T("Файлы CSV (*.csv)|*.csv|Все файлы (*.*)|*.*", "CSV files (*.csv)|*.csv|All files (*.*)|*.*"), null);
+            if (path == null || LockRequested) return;
+
+            ImportPlan plan;
+            try
+            {
+                if (new FileInfo(path).Length > MaxImportFileSize)
+                {
+                    MsgBox.Error(this, title, L.T("Файл слишком велик: на список паролей он не похож.", "The file is too large to be a list of passwords."));
+                    return;
+                }
+                string text;
+                using (var reader = new StreamReader(path, Encoding.UTF8, true))
+                {
+                    text = reader.ReadToEnd();
+                }
+                plan = VaultTransfer.ReadCsv(text);
+            }
+            catch (IOException ex)
+            {
+                MsgBox.Error(this, title, L.T("Не удалось прочитать файл.\n\n", "Could not read the file.\n\n") + ex.Message);
+                return;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                MsgBox.Error(this, title, L.T("Не удалось прочитать файл.\n\n", "Could not read the file.\n\n") + ex.Message);
+                return;
+            }
+
+            if (plan.Error != null)
+            {
+                MsgBox.Error(this, title, plan.Error);
+                return;
+            }
+            if (plan.Entries.Count == 0)
+            {
+                MsgBox.Info(this, title, L.T("В файле не нашлось ни одной записи.", "No entries were found in the file."));
+                return;
+            }
+
+            string found = L.Plural(plan.Entries.Count, "запись", "записи", "записей", "entry", "entries");
+            string groupName = L.F("Импорт {0}", "Import {0}", DateTime.Now.ToString("yyyy-MM-dd"));
+            string question = L.F("В файле найдено: {0}.", "Found in the file: {0}.", found);
+            if (plan.Skipped > 0)
+            {
+                question += " " + L.F("Пропущено пустых и непригодных строк: {0}.", "Empty or unusable lines skipped: {0}.", plan.Skipped);
+            }
+            question += "\n\n" + L.F("Записи будут добавлены в новую группу «{0}». Оттуда их можно разложить по своим группам.",
+                "The entries will be added to a new group “{0}”. From there you can sort them into your own groups.", groupName);
+            if (!MsgBox.Confirm(this, title, question, L.T("Импортировать", "Import"), L.T("Отмена", "Cancel")) || LockRequested) return;
+
+            ImportResult result;
+            try
+            {
+                result = VaultTransfer.Import(Data, plan, groupName);
+            }
+            catch (ValidationException ex)
+            {
+                MsgBox.Error(this, title, ex.Message);
+                SaveVault();
+                RefreshAll();
+                return;
+            }
+            SaveVault();
+            SetSearchSilently("");
+            filter = GroupFilter.ForGroup(result.Root.Id);
+            RefreshAll();
+
+            string imported = L.Plural(result.Entries, "запись", "записи", "записей", "entry", "entries");
+            Flash(L.F("Импортировано: {0}", "Imported: {0}", imported));
+            MsgBox.Info(this, title, L.F(
+                "Импортировано: {0}.\n\nФайл «{1}» лежит на диске незашифрованным: в нём все пароли открытым текстом. " +
+                "Убедитесь, что всё на месте, и удалите его.",
+                "Imported: {0}.\n\nThe file “{1}” is on the disk unencrypted, with every password in plain text. " +
+                "Check that everything is in place, then delete it.",
+                imported, Ui.Shorten(Path.GetFileName(path), 60)));
+        }
+
+        /// <summary>
+        /// Экспорт всех записей в незашифрованный файл: CSV понимают браузеры и другие менеджеры
+        /// паролей, JSON содержит все данные хранилища как есть.
+        /// </summary>
+        internal void ExportEntries()
+        {
+            string title = L.T("Экспорт", "Export");
+            if (Data.LiveCount == 0)
+            {
+                MsgBox.Info(this, title, L.T("В хранилище пока нет записей — экспортировать нечего.", "The vault has no entries yet, so there is nothing to export."));
+                return;
+            }
+
+            bool confirmed = MsgBox.ConfirmDanger(this, title, L.T(
+                "Экспортированный файл не будет зашифрован: все логины и пароли окажутся в нём открытым текстом, " +
+                "и прочитать их сможет любой, к кому попадёт файл.\n\n" +
+                "Экспорт нужен, чтобы перенести записи в другую программу. После этого файл стоит удалить.",
+                "The exported file will not be encrypted: every username and password will be in it in plain text, " +
+                "readable by anyone who gets hold of the file.\n\n" +
+                "Export is meant for moving the entries to another program. Delete the file afterwards."),
+                L.T("Экспортировать…", "Export…"));
+            if (!confirmed || LockRequested) return;
+
+            string path = Ui.PickFile(this, true, title,
+                L.T("CSV — для других программ (*.csv)|*.csv|JSON — все данные хранилища (*.json)|*.json",
+                    "CSV — for other programs (*.csv)|*.csv|JSON — all vault data (*.json)|*.json"),
+                "keybox-export.csv");
+            if (path == null || LockRequested) return;
+
+            try
+            {
+                if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.WriteAllBytes(path, Data.ToJson());
+                }
+                else
+                {
+                    // Метка порядка байтов нужна, чтобы Excel правильно показал русские буквы.
+                    File.WriteAllText(path, VaultTransfer.ToCsv(Data), new UTF8Encoding(true));
+                }
+            }
+            catch (IOException ex)
+            {
+                MsgBox.Error(this, title, L.T("Не удалось записать файл.\n\n", "Could not write the file.\n\n") + ex.Message);
+                return;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                MsgBox.Error(this, title, L.T("Не удалось записать файл.\n\n", "Could not write the file.\n\n") + ex.Message);
+                return;
+            }
+
+            Flash(L.F("Экспортировано: {0} — файл «{1}»", "Exported: {0} — file “{1}”",
+                L.Plural(Data.LiveCount, "запись", "записи", "записей", "entry", "entries"), Ui.Shorten(Path.GetFileName(path), 60)));
         }
 
         /// <summary>Открывает окно настроек и применяет то, что в нём выбрано.</summary>

@@ -368,6 +368,39 @@ namespace KeyBox.UI
             catch (IOException) { return false; }
         }
 
+        // ---------- Файлы ----------
+
+        /// <summary>
+        /// Нужен тестам: вместо окна выбора файла путь берётся отсюда. Первый параметр — true для
+        /// сохранения, второй — предложенное имя файла; null в ответ означает «отмена».
+        /// </summary>
+        internal static Func<bool, string, string> FilePicker { get; set; }
+
+        /// <summary>Спрашивает у пользователя файл — для открытия или для сохранения. Возвращает путь или null.</summary>
+        public static string PickFile(IWin32Window owner, bool save, string title, string filter, string suggestedName)
+        {
+            if (FilePicker != null) return FilePicker(save, suggestedName);
+
+            if (save)
+            {
+                using (var dialog = new SaveFileDialog())
+                {
+                    dialog.Title = title;
+                    dialog.Filter = filter;
+                    dialog.FileName = suggestedName ?? "";
+                    dialog.OverwritePrompt = true;
+                    return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.FileName : null;
+                }
+            }
+            using (var dialog = new OpenFileDialog())
+            {
+                dialog.Title = title;
+                dialog.Filter = filter;
+                dialog.CheckFileExists = true;
+                return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.FileName : null;
+            }
+        }
+
         // ---------- Текст ----------
 
         /// <summary>Сравнение строк «как в Проводнике»: без учёта регистра, числа — по значению.</summary>
