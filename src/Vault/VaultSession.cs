@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Security;
 using System.Security.Cryptography;
+using System.Threading;
 using KeyBox.Crypto;
 
 namespace KeyBox.Vault
@@ -34,6 +35,10 @@ namespace KeyBox.Vault
         // Сколько раз подряд файл дописан при проверке (Reload) без участия пользователя.
         private const int MaxUnattendedWrites = 3;
         private int unattendedWrites;
+
+        // Сколько раз и с какой паузой перечитывать занятый файл перед записью.
+        private const int BusyFileAttempts = 5;
+        private const int BusyFileDelayMs = 60;
 
         private VaultSession()
         {
@@ -365,15 +370,23 @@ namespace KeyBox.Vault
         private void MergeFromDisk()
         {
             byte[] disk;
-            try
+            for (int attempt = 1; ; attempt++)
             {
-                disk = ReadIfChanged();
-            }
-            catch (VaultException ex)
-            {
-                // Файл такого размера хранилищем быть не может: беречь в нём нечего.
-                if (ex.Error == VaultError.BadFormat) return;
-                throw;
+                try
+                {
+                    disk = ReadIfChanged();
+                    break;
+                }
+                catch (VaultException ex)
+                {
+                    // Файл такого размера хранилищем быть не может: беречь в нём нечего.
+                    if (ex.Error == VaultError.BadFormat) return;
+
+                    // Файл может быть занят на мгновение — его как раз записывает облачная папка
+                    // или проверяет антивирус. Немного ждём, прежде чем сообщать о сбое.
+                    if (attempt >= BusyFileAttempts) throw;
+                    Thread.Sleep(BusyFileDelayMs);
+                }
             }
             if (disk == null) return;
 

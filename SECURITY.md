@@ -37,3 +37,14 @@ KeyBox хранит пароли, поэтому сообщения об уяз�
 ## Поддерживаемые версии
 
 Исправления выходят только для последней версии программы.
+
+## In English
+
+KeyBox stores passwords, so vulnerability reports matter a lot here. Please do not describe
+a vulnerability in a public issue. Report it privately instead: open the **Security** tab of
+the repository and press **Report a vulnerability**, or go straight to the
+[report form](https://github.com/ihate7/key-box/security/advisories/new). Include the program
+version (menu “⋯” → “About”), the Windows version, what can be done and under which conditions,
+and the steps to reproduce it. Fixes are released for the latest version only. The limits named
+in the “Security” section of the [README](README.en.md) — malware on the same computer, a weak
+master password, decrypted data in the memory of the running program — are not vulnerabilities.

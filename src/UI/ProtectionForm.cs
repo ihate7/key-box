@@ -46,9 +46,9 @@ namespace KeyBox.UI
             if (!protection.IsArgon2)
             {
                 status += "\n\n" + L.T(
-                    "После сохранения хранилище перейдёт на Argon2id: он намного лучше защищает от подбора пароля на видеокартах. " +
+                    "После сохранения хранилище перейдёт на Argon2id: он лучше защищает от подбора пароля на видеокартах. " +
                     "Прежние версии KeyBox (1.x) такое хранилище открыть не смогут.",
-                    "After saving, the vault will switch to Argon2id, which protects far better against password guessing on graphics cards. " +
+                    "After saving, the vault will switch to Argon2id, which protects better against password guessing on graphics cards. " +
                     "Earlier versions of KeyBox (1.x) will not be able to open such a vault.");
             }
             Label lblStatus = Ui.MakeWrapLabel(status, ContentWidth, Ui.TextColor);

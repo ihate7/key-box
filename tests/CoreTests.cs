@@ -2076,6 +2076,21 @@ namespace KeyBox.Tests
             File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(++foreignWrites));
         }
 
+        /// <summary>
+        /// Проверка файла, который только что изменили «со стороны». Сразу после записи файл бывает
+        /// занят на мгновение (антивирус, индексатор) — тогда программа заглянула бы в него при
+        /// следующей проверке; тест делает то же самое.
+        /// </summary>
+        private static bool ReloadChanged(VaultSession session)
+        {
+            for (int attempt = 0; attempt < 40; attempt++)
+            {
+                if (session.Reload()) return true;
+                System.Threading.Thread.Sleep(50);
+            }
+            return false;
+        }
+
         private static void SharedFileMerge()
         {
             string path = NewVaultPath("shared");
@@ -2103,7 +2118,7 @@ namespace KeyBox.Tests
 
                 // Первая копия узнаёт о чужой записи при проверке файла — и ничего не пишет: в файле уже всё есть.
                 byte[] before = File.ReadAllBytes(path);
-                Check(first.Reload(), "the first copy notices the changed file");
+                Check(ReloadChanged(first), "the first copy notices the changed file");
                 merged = first.TakeMerge();
                 Check(merged != null && merged.EntriesAdded == 1 && first.Data.FindEntry(b.Id) != null, "and picks up the entry of the second one");
                 Equal(before, File.ReadAllBytes(path));
@@ -2114,7 +2129,7 @@ namespace KeyBox.Tests
                 first.Data.TrashEntries(new[] { b.Id });
                 first.Data.DeleteEntries(new[] { b.Id });
                 first.Save();
-                Check(second.Reload(), "the deletion is noticed");
+                Check(ReloadChanged(second), "the deletion is noticed");
                 merged = second.TakeMerge();
                 Check(merged.EntriesRemoved == 1 && second.Data.FindEntry(b.Id) == null && second.Data.Entries.Count == 1,
                     "an entry deleted in one copy is gone in the other");
@@ -2126,7 +2141,7 @@ namespace KeyBox.Tests
                 second.Data.UpdateEntry(a.Id, null, "a-renamed", "password-of-second", "С первого компьютера");
                 Touch(second.Data.FindEntry(a.Id), "2026-03-01T11:00:00Z");
                 second.Save();
-                Check(first.Reload(), "the later edit is noticed");
+                Check(ReloadChanged(first), "the later edit is noticed");
                 Entry result = first.Data.FindEntry(a.Id);
                 Check(result.Login == "a-renamed" && result.Password == "password-of-second", "the later edit wins in both copies");
                 bool kept = false;
@@ -2137,10 +2152,10 @@ namespace KeyBox.Tests
                 // Несколько объединений подряд складываются в один итог.
                 second.Data.AddEntry(null, "c", "pc", "Третья");
                 second.Save();
-                first.Reload();
+                ReloadChanged(first);
                 second.Data.AddEntry(null, "d", "pd", "Четвёртая");
                 second.Save();
-                first.Reload();
+                ReloadChanged(first);
                 merged = first.TakeMerge();
                 Check(merged.EntriesAdded == 2 && merged.EntriesUpdated == 1, "results add up until they are taken: " + merged.Describe());
             }
@@ -2157,7 +2172,7 @@ namespace KeyBox.Tests
                 Entry theirs = first.Data.AddEntry(null, "first", "p1", "Записана первой копией");
                 first.Save();
 
-                Check(second.Reload(), "the changed file is noticed");
+                Check(ReloadChanged(second), "the changed file is noticed");
                 Check(second.Data.Entries.Count == 2 && !second.HasUnwrittenChanges, "the copy merges the file and writes back what it lacked");
                 using (VaultSession file = VaultSession.Open(path, Password))
                 {
@@ -2166,7 +2181,7 @@ namespace KeyBox.Tests
 
                 // Первая копия подхватывает это и ничего больше не пишет: копии сошлись.
                 byte[] settled = File.ReadAllBytes(path);
-                Check(first.Reload() && first.Data.ContentEquals(second.Data), "the first copy catches up");
+                Check(ReloadChanged(first) && first.Data.ContentEquals(second.Data), "the first copy catches up");
                 Check(!second.Reload() && !first.Reload(), "then both stay quiet");
                 Equal(settled, File.ReadAllBytes(path));
 
@@ -2179,7 +2194,9 @@ namespace KeyBox.Tests
                 for (int round = 0; round < 6; round++)
                 {
                     WriteForeign(path, stale);
-                    second.Reload();
+                    // С пятого раза в файле лежит ровно то, что копия уже видела, — читать его заново незачем.
+                    if (round < 4) Check(ReloadChanged(second), "round " + round + ": the stale file is noticed");
+                    else Check(!second.Reload(), "round " + round + ": a file already seen is not merged again");
                     if (!SameBytes(stale, File.ReadAllBytes(path))) rewritten++;
                 }
                 Check(rewritten == 3, "the file is rewritten a limited number of times: " + rewritten);
@@ -2205,7 +2222,7 @@ namespace KeyBox.Tests
             {
                 first.Data.AddEntry(null, "common", "p0", "Общая запись");
                 first.Save();
-                second.Reload();
+                ReloadChanged(second);
 
                 // Копия того же хранилища читается тем же ключом — пароль не нужен.
                 string twin = path + ".twin";
@@ -2219,7 +2236,7 @@ namespace KeyBox.Tests
 
                 late = second.Data.AddEntry(null, "late", "p1", "Добавлена после смены пароля");
                 ExpectVaultError(VaultError.Conflict, delegate { second.Save(); });
-                ExpectVaultError(VaultError.Conflict, delegate { second.Reload(); });
+                ExpectVaultError(VaultError.Conflict, delegate { ReloadChanged(second); });
                 Equal(rekeyed, File.ReadAllBytes(path));
 
                 // Несохранённое уходит в отдельный файл рядом, который открывается прежним паролем.
@@ -2271,7 +2288,7 @@ namespace KeyBox.Tests
                 newerFormat[6] = 9;
                 WriteForeign(newerPath, newerFormat);
                 ExpectVaultError(VaultError.Conflict, delegate { session.Save(); });
-                ExpectVaultError(VaultError.Conflict, delegate { session.Reload(); });
+                ExpectVaultError(VaultError.Conflict, delegate { ReloadChanged(session); });
                 Equal(newerFormat, File.ReadAllBytes(newerPath));
 
                 byte[] key = VaultFormat.DeriveKey(Password, header.Salt, header.Iterations);

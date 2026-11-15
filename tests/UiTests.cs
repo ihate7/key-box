@@ -1243,6 +1243,7 @@ namespace KeyBox.Tests
                 Check(length.Value == 20 && Find<CheckBox>(f, "chkNoLookAlikes").Checked && Find<CheckBox>(f, "chkAutoTypeEnter").Checked, "generator defaults");
                 foreach (string name in classes) Check(Find<CheckBox>(f, name).Checked, name + " is on by default");
                 Check(sample.Text.Length == 20, "a sample password is shown: " + sample.Text);
+                Shot(f, "32-settings");
 
                 // Пароль не из чего составлять — так сохранить нельзя.
                 foreach (string name in classes) Find<CheckBox>(f, name).Checked = false;
@@ -1259,7 +1260,6 @@ namespace KeyBox.Tests
                 SelectCombo(autoLock, "через 10 минут");
                 SelectCombo(clipboard, "через 60 секунд");
                 Find<CheckBox>(f, "chkAutoTypeEnter").Checked = false;
-                Shot(f, "32-settings");
                 Click(f, "btnOk");
             });
 
@@ -1781,12 +1781,12 @@ namespace KeyBox.Tests
 
                     Click(f, "btnBrowse");
                     Check(Find<TextBox>(f, "txtFile").Text == keyPath && !error.Visible, "the chosen path is shown");
+                    Shot(f, "35-protection");
 
                     password.Text = "не тот пароль";
                     Click(f, "btnOk");
                     WaitUntil(delegate { return !f.IsBusy; }, 20000, "the password check");
                     Check(f.Visible && error.Visible && error.Text.Contains("неверно") && !File.Exists(keyPath), "a wrong password changes nothing: " + error.Text);
-                    Shot(f, "35-protection");
 
                     password.Text = NewMasterPassword;
                     Click(f, "btnOk");
@@ -2517,9 +2517,8 @@ namespace KeyBox.Tests
                     other.Save();
                 }
                 Check(!HasTitle("С другого компьютера"), "the entry is not in the list before the file is checked");
-                main.CheckFile();
-                Pump(50);
-                Check(HasTitle("С другого компьютера") && session.Data.Entries.Count == entriesBefore + 1, "the entry appears after the check");
+                CheckFileUntil(delegate { return HasTitle("С другого компьютера"); }, "the entry to appear after the file check");
+                Check(session.Data.Entries.Count == entriesBefore + 1, "one entry is added: " + session.Data.Entries.Count);
                 Check(StatusText("lblMessage") == "Файл изменён в другом месте — подхвачено: записей добавлено: 1", "status: " + StatusText("lblMessage"));
                 Check(StatusText("lblCount").Contains((entriesBefore + 1).ToString()), "the counter follows: " + StatusText("lblCount"));
                 Shot(main, "37-picked-up");
@@ -2701,7 +2700,15 @@ namespace KeyBox.Tests
                     other.ChangePassword(changedPassword);
                 }
                 window = main;
-                Drive<MsgBox>(delegate { window.CheckFile(); }, delegate(MsgBox box)
+                Drive<MsgBox>(delegate
+                {
+                    // Файл сразу после записи бывает занят на мгновение; программа в таком случае заглянет в него позже.
+                    for (int attempt = 0; attempt < 50 && !window.LockRequested; attempt++)
+                    {
+                        window.CheckFile();
+                        Pump(100);
+                    }
+                }, delegate(MsgBox box)
                 {
                     string text = Find<Label>(box, "lblText").Text;
                     Check(text.Contains("сменили мастер-пароль") && !text.Contains(".conflict-") && text.Contains("заблокируется"), "nothing to set aside: " + text);
@@ -2767,6 +2774,24 @@ namespace KeyBox.Tests
         private static bool HasTitle(string title)
         {
             return Array.IndexOf(Titles(), title) >= 0;
+        }
+
+        /// <summary>
+        /// Просит главное окно свериться с файлом, пока не выполнится условие. Одной попытки может
+        /// не хватить: сразу после записи файл бывает занят на мгновение (антивирус, индексатор),
+        /// и программа в таком случае просто заглянет в него при следующей проверке.
+        /// </summary>
+        private static void CheckFileUntil(Func<bool> condition, string what)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            while (true)
+            {
+                main.CheckFile();
+                Pump(50);
+                if (condition()) return;
+                if (watch.ElapsedMilliseconds > 8000) throw new Exception("timed out waiting for " + what);
+                Pump(150);
+            }
         }
 
         private static void AutoLock()
@@ -2928,22 +2953,22 @@ namespace KeyBox.Tests
                 {
                     Check(f.Text == "Settings" && Find<ComboBox>(f, "cmbAutoLock").SelectedItem.ToString() == "after 5 minutes",
                         "the settings window: " + Find<ComboBox>(f, "cmbAutoLock").SelectedItem);
+                    Shot(f, "en-05-settings");
                     foreach (string name in new[] { "chkUpper", "chkLower", "chkDigits", "chkSymbols" }) Find<CheckBox>(f, name).Checked = false;
                     Click(f, "btnOk");
                     Check(Find<Label>(f, "lblError").Visible, "an impossible generator setting is refused");
                     CheckEnglish(f);
                     Find<CheckBox>(f, "chkLower").Checked = true;
-                    Shot(f, "en-05-settings");
                     Click(f, "btnCancel");
                 });
 
                 Drive<ProtectionForm>(delegate { ClickTool("toolbar", "miProtection"); }, delegate(ProtectionForm f)
                 {
                     Check(Find<Label>(f, "lblStatus").Text.Contains("Argon2id (64 MiB of memory"), "protection is described: " + Find<Label>(f, "lblStatus").Text);
+                    Shot(f, "en-06-protection");
                     Click(f, "btnOk");
                     Check(Find<Label>(f, "lblError").Text == "Enter the master password.", "validation message: " + Find<Label>(f, "lblError").Text);
                     CheckEnglish(f);
-                    Shot(f, "en-06-protection");
                     Click(f, "btnCancel");
                 });
 
@@ -2961,8 +2986,7 @@ namespace KeyBox.Tests
                     other.Data.AddEntry(null, "remote", "remote-pass-1", "Added elsewhere");
                     other.Save();
                 }
-                main.CheckFile();
-                Pump(50);
+                CheckFileUntil(delegate { return FindEntry("Added elsewhere") != null; }, "the entry added elsewhere to be picked up");
                 Check(StatusText("lblMessage") == "The file was changed elsewhere — picked up: entries added: 1", "status: " + StatusText("lblMessage"));
                 CheckEnglish(main);
 

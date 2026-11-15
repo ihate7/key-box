@@ -113,6 +113,7 @@ namespace KeyBox.UI
         private string mergeNote;
         private int sinceFileCheck;
         private bool exiting;
+        private bool dragging;
 
         public MainForm(VaultSession session)
         {
@@ -1122,8 +1123,8 @@ namespace KeyBox.UI
         /// </summary>
         internal void CheckFile()
         {
-            // Пока открыт диалог или нажата кнопка мыши (идёт перетаскивание), список под руками не меняется.
-            if (closing || LockRequested || ReopenRequested || OwnedForms.Length > 0 || MouseButtons != MouseButtons.None) return;
+            // Пока открыт диалог или идёт перетаскивание, список под руками не меняется.
+            if (closing || LockRequested || ReopenRequested || dragging || OwnedForms.Length > 0) return;
 
             try
             {
@@ -2257,7 +2258,7 @@ namespace KeyBox.UI
             var item = node == null ? null : node.Tag as GroupItem;
             if (item == null || item.Kind != FilterKind.Group) return;
 
-            treeGroups.DoDragDrop(new DataObject(GroupDragFormat, item.Id), DragDropEffects.Move);
+            Drag(treeGroups, new DataObject(GroupDragFormat, item.Id));
             treeGroups.DropNode = null;
         }
 
@@ -2328,8 +2329,22 @@ namespace KeyBox.UI
             if (e.Button != MouseButtons.Left || filter.Kind == FilterKind.Trash) return;
             string[] ids = SelectedIds();
             if (ids.Length == 0) return;
-            lvEntries.DoDragDrop(new DataObject(DragFormat, ids), DragDropEffects.Move);
+            Drag(lvEntries, new DataObject(DragFormat, ids));
             treeGroups.DropNode = null;
+        }
+
+        /// <summary>Перетаскивание из окна. Пока оно идёт, список не обновляется из файла (см. CheckFile).</summary>
+        private void Drag(Control source, DataObject data)
+        {
+            dragging = true;
+            try
+            {
+                source.DoDragDrop(data, DragDropEffects.Move);
+            }
+            finally
+            {
+                dragging = false;
+            }
         }
 
         private void OnEntriesKeyDown(object sender, KeyEventArgs e)
