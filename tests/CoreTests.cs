@@ -33,6 +33,7 @@ namespace KeyBox.Tests
             Console.OutputEncoding = new UTF8Encoding(false);
 
             // Тесты сверяют тексты сообщений, поэтому язык задаётся явно, а не берётся из системы.
+            L.SystemLanguageOverride = Language.Russian;
             L.Current = Language.Russian;
 
             workDir = args.Length > 0

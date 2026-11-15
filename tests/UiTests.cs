@@ -67,6 +67,8 @@ namespace KeyBox.Tests
             }
 
             // Сценарий сверяет русские тексты окон, поэтому язык задаётся явно, а не берётся из системы.
+            // «Язык системы» тоже закреплён: настройка «как в Windows» не должна зависеть от машины.
+            L.SystemLanguageOverride = Language.Russian;
             L.Current = Language.Russian;
 
             workDir = Path.GetFullPath(args[0]);
@@ -1263,6 +1265,7 @@ namespace KeyBox.Tests
             Check(!saved.PasswordUpper && saved.PasswordLower && saved.PasswordDigits && !saved.PasswordSymbols && !saved.AutoTypeEnter && saved.Language == null,
                 "switches are stored in the vault");
             Check(StatusText("lblMessage") == "Настройки сохранены", "status: " + StatusText("lblMessage"));
+            Check(!main.IsDisposed && !main.ReopenRequested, "the window is not reopened while the language stays the same");
             Check(main.AutoLockSeconds == 600, "the new auto-lock time is applied at once: " + main.AutoLockSeconds);
             using (VaultSession copy = VaultSession.Open(vaultPath, MasterPassword))
             {
@@ -2184,6 +2187,7 @@ namespace KeyBox.Tests
             MainForm previousMain = main;
             session = null;
             main = null;
+            L.SystemLanguageOverride = Language.English;
             L.Current = Language.English;
             try
             {
@@ -2349,6 +2353,7 @@ namespace KeyBox.Tests
             }
             finally
             {
+                L.SystemLanguageOverride = Language.Russian;
                 L.Current = Language.Russian;
                 if (main != null && !main.IsDisposed) main.Close();
                 if (session != null) session.Dispose();

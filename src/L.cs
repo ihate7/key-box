@@ -22,6 +22,12 @@ namespace KeyBox
 
         private static Language current = DetectSystemLanguage();
 
+        /// <summary>
+        /// Нужен тестам: язык, который считать «языком системы» вместо настоящего, чтобы результат
+        /// не зависел от того, на каком языке Windows на машине, где идёт прогон.
+        /// </summary>
+        internal static Language? SystemLanguageOverride { get; set; }
+
         /// <summary>Язык, на котором сейчас показываются все тексты.</summary>
         public static Language Current
         {
@@ -98,6 +104,8 @@ namespace KeyBox
         /// </summary>
         public static Language DetectSystemLanguage()
         {
+            if (SystemLanguageOverride.HasValue) return SystemLanguageOverride.Value;
+
             try
             {
                 if (string.Equals(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName, "ru", StringComparison.OrdinalIgnoreCase))
