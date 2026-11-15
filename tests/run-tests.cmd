@@ -53,10 +53,15 @@ echo === UI tests ===
     /out:%OUT%\UiTests.exe /recurse:src\*.cs tests\UiTests.cs tests\IsolatedDesktop.cs
 if errorlevel 1 exit /b 1
 
+rem On the automated test machines (GitHub sets CI=true) auto-type is also checked with real
+rem keystrokes sent to a test window. On a person's desktop the tests never type anything.
+set "REAL_INPUT="
+if /i "%CI%"=="true" set "REAL_INPUT=--real-input"
+
 if /i "%~1"=="visible" (
     %OUT%\UiTests.exe %OUT%\ui --visible || set "FAILED=1"
 ) else (
-    %OUT%\UiTests.exe %OUT%\ui || set "FAILED=1"
+    %OUT%\UiTests.exe %OUT%\ui %REAL_INPUT% || set "FAILED=1"
 )
 
 :done

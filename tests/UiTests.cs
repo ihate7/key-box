@@ -132,6 +132,11 @@ namespace KeyBox.Tests
             Run("website and one-time codes", WebsiteAndCodes);
             Run("previous passwords of an entry", PasswordHistory);
             Run("settings: stored in the vault and applied at once", Settings);
+            Run("auto-type: sequence, safety checks, messages", AutoTyping);
+            if (Array.IndexOf(args, "--real-input") >= 0)
+            {
+                Run("auto-type: real keystrokes reach a window", RealAutoType);
+            }
             Run("about box", About);
             Run("failed save is reported and can be retried", SaveFailure);
             Run("every change is already on disk", Persistence);
@@ -1310,6 +1315,253 @@ namespace KeyBox.Tests
             session.Save();
             OpenMain();
             Check(GroupNames()[0] == "Все записи" && main.AutoLockSeconds == 300, "defaults are back");
+        }
+
+        /// <summary>Подмена системы для автоввода: ничего не набирает, а записывает, что было бы набрано.</summary>
+        private sealed class FakeTyping : AutoTypeSystem
+        {
+            public readonly List<string> Sent = new List<string>();
+            public readonly IntPtr Own = new IntPtr(100);
+            public readonly IntPtr Target = new IntPtr(200);
+            public readonly IntPtr Other = new IntPtr(300);
+
+            /// <summary>Сколько опросов активным остаётся окно самой программы; −1 — всегда.</summary>
+            public int OwnPolls = 2;
+
+            /// <summary>Сколько опросов «зажаты» Ctrl, Shift и подобные клавиши; −1 — всегда.</summary>
+            public int ModifierPolls = 2;
+
+            /// <summary>После скольких отправок активным становится постороннее окно; −1 — никогда.</summary>
+            public int SwitchAfterSends = -1;
+
+            public bool FailSending;
+            public int Minimized;
+            public int Restored;
+
+            public override IntPtr ForegroundWindow()
+            {
+                if (OwnPolls < 0) return Own;
+                if (OwnPolls > 0)
+                {
+                    OwnPolls--;
+                    return Own;
+                }
+                return SwitchAfterSends >= 0 && Sent.Count >= SwitchAfterSends ? Other : Target;
+            }
+
+            public override bool IsOwnOrShell(IntPtr window)
+            {
+                return window == Own;
+            }
+
+            public override string Title(IntPtr window)
+            {
+                return window == Target ? "Вход — Браузер" : "Другое окно";
+            }
+
+            public override bool ModifiersDown()
+            {
+                if (ModifierPolls < 0) return true;
+                if (ModifierPolls == 0) return false;
+                ModifierPolls--;
+                return true;
+            }
+
+            public override bool SendText(string text)
+            {
+                if (FailSending) return false;
+                Sent.Add(text);
+                return true;
+            }
+
+            public override bool SendKey(int virtualKey)
+            {
+                if (FailSending) return false;
+                Sent.Add(virtualKey == AutoType.KeyTab ? "<Tab>" : (virtualKey == AutoType.KeyEnter ? "<Enter>" : "<" + virtualKey + ">"));
+                return true;
+            }
+
+            public override void Sleep(int milliseconds)
+            {
+                // Ожидания в тесте мгновенные.
+            }
+
+            public override void Minimize(Form form)
+            {
+                Minimized++;
+            }
+
+            public override void Restore(Form form, FormWindowState state)
+            {
+                Restored++;
+            }
+        }
+
+        private static string Describe(List<AutoTypeStep> steps)
+        {
+            var parts = new List<string>();
+            foreach (AutoTypeStep step in steps)
+            {
+                if (step.Key == AutoType.KeyTab) parts.Add("<Tab>");
+                else if (step.Key == AutoType.KeyEnter) parts.Add("<Enter>");
+                else parts.Add(step.Text);
+            }
+            return string.Join("|", parts.ToArray());
+        }
+
+        /// <summary>
+        /// Автоввод. Настоящие нажатия здесь не отправляются: система подменена, и тест сверяет,
+        /// что и в каком порядке было бы набрано и когда ввод останавливается.
+        /// </summary>
+        private static void AutoTyping()
+        {
+            const string login = "ivan.petrov@example.com";
+            const string password = "Qw7!kPz#2026mail";
+
+            Check(Describe(AutoType.Plan("user", "secret", true)) == "user|<Tab>|secret|<Enter>", "the full sequence");
+            Check(Describe(AutoType.Plan("user", "secret", false)) == "user|<Tab>|secret", "without Enter");
+            Check(Describe(AutoType.Plan("", "secret", true)) == "secret|<Enter>", "password only");
+            Check(Describe(AutoType.Plan("user", "", true)) == "user|<Enter>", "login only");
+            Check(AutoType.Plan("", "", true).Count == 0 && AutoType.Plan(null, null, false).Count == 0, "nothing to type");
+            Check(AutoTypeSystem.InputSize == (IntPtr.Size == 8 ? 40 : 28), "the INPUT structure has the size Windows expects: " + AutoTypeSystem.InputSize);
+
+            AutoTypeSystem real = AutoType.Driver;
+            try
+            {
+                // Обычный ход: окно убирается с дороги, программа ждёт чужое окно и отпущенные клавиши.
+                var typing = new FakeTyping();
+                AutoType.Driver = typing;
+                SelectGroup("Все записи");
+                SelectEntries("Почта Gmail");
+                Check(Tool("toolbar", "btnAutoType").Enabled, "'auto-type' is available for one entry");
+                Key(Keys.Control | Keys.T);
+                SameList(new[] { login, "<Tab>", password, "<Enter>" }, typing.Sent.ToArray(), "Ctrl+T types the login, Tab, the password and Enter");
+                Check(typing.Minimized == 1 && typing.Restored == 0, "the window gets out of the way and stays there");
+                Check(StatusText("lblMessage") == "Введено в окно «Вход — Браузер»", "status: " + StatusText("lblMessage"));
+
+                typing = new FakeTyping();
+                AutoType.Driver = typing;
+                Key(Keys.Control | Keys.Shift | Keys.T);
+                SameList(new[] { password, "<Enter>" }, typing.Sent.ToArray(), "Ctrl+Shift+T types the password only");
+
+                // Чужое окно так и не стало активным.
+                typing = new FakeTyping();
+                typing.OwnPolls = -1;
+                AutoType.Driver = typing;
+                ClickTool("toolbar", "btnAutoType");
+                Check(typing.Sent.Count == 0 && typing.Restored == 1 && StatusText("lblMessage").Contains("Некуда вводить"), "no target window: " + StatusText("lblMessage"));
+
+                // Активное окно сменилось после логина: пароль никуда не уходит.
+                typing = new FakeTyping();
+                typing.SwitchAfterSends = 2;
+                AutoType.Driver = typing;
+                Key(Keys.Control | Keys.T);
+                SameList(new[] { login, "<Tab>" }, typing.Sent.ToArray(), "typing stops as soon as the window changes");
+                Check(typing.Restored == 1 && StatusText("lblMessage").Contains("остановлен"), "status: " + StatusText("lblMessage"));
+
+                // Клавиши так и не отпустили.
+                typing = new FakeTyping();
+                typing.ModifierPolls = -1;
+                AutoType.Driver = typing;
+                Key(Keys.Control | Keys.T);
+                Check(typing.Sent.Count == 0 && StatusText("lblMessage").Contains("остановлен"), "held keys: " + StatusText("lblMessage"));
+
+                // Windows не приняла нажатия.
+                typing = new FakeTyping();
+                typing.FailSending = true;
+                AutoType.Driver = typing;
+                Key(Keys.Control | Keys.T);
+                Check(typing.Sent.Count == 0 && StatusText("lblMessage").Contains("не удался"), "rejected input: " + StatusText("lblMessage"));
+
+                // Настройка «не нажимать Enter».
+                VaultSettings custom = session.Data.EffectiveSettings;
+                custom.AutoTypeEnter = false;
+                session.Data.UpdateSettings(custom);
+                main.Close();
+                Pump(50);
+                OpenMain();
+                SelectEntries("Почта Gmail");
+                typing = new FakeTyping();
+                AutoType.Driver = typing;
+                Key(Keys.Control | Keys.T);
+                SameList(new[] { login, "<Tab>", password }, typing.Sent.ToArray(), "no Enter when the setting is off");
+                session.Data.UpdateSettings(VaultSettings.Defaults());
+                session.Save();
+                main.Close();
+                Pump(50);
+                OpenMain();
+
+                // Запись, в которой вводить нечего, и запись в корзине.
+                AddEntry("Только описание", "", "", null);
+                SelectGroup("Все записи");
+                SelectEntries("Только описание");
+                typing = new FakeTyping();
+                AutoType.Driver = typing;
+                Key(Keys.Control | Keys.T);
+                Check(typing.Sent.Count == 0 && typing.Minimized == 0 && StatusText("lblMessage").Contains("вводить нечего"), "an empty entry: " + StatusText("lblMessage"));
+
+                ClickTool("toolbar", "btnDelete");
+                SelectGroup("Корзина");
+                SelectEntries("Только описание");
+                Check(!Tool("toolbar", "btnAutoType").Enabled, "no auto-type from the trash");
+                Drive<MsgBox>(delegate { main.EmptyTrash(); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+                Check(session.Data.Entries.Count == 7, "the temporary entry is removed");
+            }
+            finally
+            {
+                AutoType.Driver = real;
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        /// <summary>
+        /// Настоящие нажатия через Windows. Запускается только с ключом --real-input (так делают
+        /// машины автотестов): на рабочем столе человека тест ничего набирать не должен.
+        /// </summary>
+        private static void RealAutoType()
+        {
+            const string text = "Qw7!kPz#2026 mail-Пароль-äöü";
+            using (var form = new Form())
+            {
+                var first = new TextBox();
+                var second = new TextBox();
+                first.Dock = DockStyle.Top;
+                second.Dock = DockStyle.Bottom;
+                form.Controls.Add(first);
+                form.Controls.Add(second);
+                form.Text = "KeyBox auto-type target";
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(60, 60);
+                form.Size = new Size(460, 140);
+                form.TopMost = true;
+                form.Show();
+                form.Activate();
+                NativeMethods.SetForegroundWindow(form.Handle);
+                first.Focus();
+                Pump(400);
+
+                if (GetForegroundWindow() != form.Handle)
+                {
+                    Console.WriteLine("      note: this session cannot bring a window to the foreground, real keystrokes are not checked");
+                    return;
+                }
+
+                var system = new AutoTypeSystem();
+                Check(system.IsOwnOrShell(form.Handle), "the program recognises its own windows");
+                Check(system.Title(form.Handle) == "KeyBox auto-type target", "window titles are read: " + system.Title(form.Handle));
+
+                Check(system.SendText(text), "Windows accepts the keystrokes");
+                WaitUntil(delegate { return first.Text.Length >= text.Length; }, 5000, "the typed text to arrive");
+                Check(first.Text == text, "the text arrives intact: " + first.Text);
+
+                Check(system.SendKey(AutoType.KeyTab), "Windows accepts the Tab key");
+                WaitUntil(delegate { return second.Focused; }, 5000, "Tab to move the focus");
+                Check(system.SendText("second"), "typing continues in the next field");
+                WaitUntil(delegate { return second.Text == "second"; }, 5000, "the second field to be filled");
+                Check(first.Text == text, "the first field is left as it was");
+            }
         }
 
         private static List<Label> AllLabels(Control root)

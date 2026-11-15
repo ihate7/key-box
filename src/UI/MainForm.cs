@@ -52,6 +52,7 @@ namespace KeyBox.UI
         private ToolStripButton btnEdit;
         private ToolStripButton btnDelete;
         private ToolStripButton btnRestore;
+        private ToolStripButton btnAutoType;
         private ToolStripButton btnCopyLogin;
         private ToolStripButton btnCopyPassword;
         private ToolStripDropDownButton btnMove;
@@ -191,6 +192,10 @@ namespace KeyBox.UI
             btnRestore = ToolButton("btnRestore", L.T("Восстановить", "Restore"), Ui.GlyphUndo,
                 L.T("Вернуть выбранные записи из корзины", "Bring the selected entries back from the trash"), true, delegate { RestoreEntries(); });
             btnRestore.Visible = false;
+            btnAutoType = ToolButton("btnAutoType", L.T("Автоввод", "Auto-type"), Ui.GlyphKeyboard,
+                L.T("Набрать логин и пароль в окне, которое было активно до KeyBox (Ctrl+T)",
+                    "Type the username and password into the window that was active before KeyBox (Ctrl+T)"),
+                true, delegate { AutoTypeEntry(false); });
             btnCopyLogin = ToolButton("btnCopyLogin", L.T("Логин", "Username"), Ui.GlyphCopy, L.T("Копировать логин (Ctrl+B)", "Copy username (Ctrl+B)"), true, delegate { CopyField(false); });
             btnCopyPassword = ToolButton("btnCopyPassword", L.T("Пароль", "Password"), Ui.GlyphCopy, L.T("Копировать пароль (Ctrl+C)", "Copy password (Ctrl+C)"), true, delegate { CopyField(true); });
 
@@ -249,7 +254,7 @@ namespace KeyBox.UI
             toolbar.Items.AddRange(new ToolStripItem[]
             {
                 btnAdd, btnEdit, btnDelete, btnRestore, new ToolStripSeparator(),
-                btnCopyLogin, btnCopyPassword, sepMove,
+                btnAutoType, btnCopyLogin, btnCopyPassword, sepMove,
                 btnMove, new ToolStripSeparator(),
                 btnShow,
                 btnMore, btnLock, txtSearch
@@ -426,6 +431,11 @@ namespace KeyBox.UI
             StyleMenu(entryMenu);
             entryMenu.Name = "entryMenu";
 
+            ToolStripMenuItem miAutoType = MenuItem(L.T("Автоввод логина и пароля", "Auto-type username and password"), "Ctrl+T", delegate { AutoTypeEntry(false); });
+            miAutoType.Name = "miAutoType";
+            ToolStripMenuItem miAutoTypePassword = MenuItem(L.T("Автоввод только пароля", "Auto-type password only"), "Ctrl+Shift+T", delegate { AutoTypeEntry(true); });
+            miAutoTypePassword.Name = "miAutoTypePassword";
+            var afterAutoType = new ToolStripSeparator();
             ToolStripMenuItem miCopyPassword = MenuItem(L.T("Копировать пароль", "Copy password"), "Ctrl+C", delegate { CopyField(true); });
             ToolStripMenuItem miCopyLogin = MenuItem(L.T("Копировать логин", "Copy username"), "Ctrl+B", delegate { CopyField(false); });
             ToolStripMenuItem miCopyCode = MenuItem(L.T("Копировать одноразовый код", "Copy one-time code"), "Ctrl+Shift+C", delegate { CopyCode(); });
@@ -453,6 +463,7 @@ namespace KeyBox.UI
 
             entryMenu.Items.AddRange(new ToolStripItem[]
             {
+                miAutoType, miAutoTypePassword, afterAutoType,
                 miCopyPassword, miCopyLogin, miCopyCode, miOpenSite, new ToolStripSeparator(),
                 miEdit, miHistory, miMove, miRestore, miDelete, miEmptyTrash, beforeAdd,
                 miAdd
@@ -470,6 +481,11 @@ namespace KeyBox.UI
                 miHistory.Enabled = single != null && single.History != null && single.History.Count > 0;
 
                 // В корзине запись можно только восстановить или стереть окончательно.
+                miAutoType.Visible = !inTrash;
+                miAutoTypePassword.Visible = !inTrash;
+                afterAutoType.Visible = !inTrash;
+                miAutoType.Enabled = selected == 1;
+                miAutoTypePassword.Enabled = selected == 1;
                 miEdit.Visible = !inTrash;
                 miMove.Visible = !inTrash;
                 miRestore.Visible = inTrash;
@@ -841,6 +857,7 @@ namespace KeyBox.UI
             btnRestore.Visible = inTrash;
 
             btnEdit.Enabled = selected == 1 && !inTrash;
+            btnAutoType.Enabled = selected == 1 && !inTrash;
             btnDelete.Enabled = selected > 0;
             btnRestore.Enabled = selected > 0;
             btnCopyLogin.Enabled = selected == 1;
@@ -1279,6 +1296,55 @@ namespace KeyBox.UI
             // Код виден в строке состояния: его удобно прочитать и набрать на другом устройстве.
             Flash(L.F("Код {0} скопирован, действует ещё {1} с", "Code {0} copied, valid for another {1} s",
                 Totp.Readable(code), Totp.SecondsLeft(key, now)));
+        }
+
+        /// <summary>
+        /// Автоввод: окно сворачивается, и логин с паролем выбранной записи набираются в окне,
+        /// которое было активно до KeyBox. Буфер обмена не используется.
+        /// </summary>
+        /// <param name="passwordOnly">true — вводить только пароль.</param>
+        internal void AutoTypeEntry(bool passwordOnly)
+        {
+            Entry entry = SingleSelected();
+            if (entry == null || entry.IsDeleted) return;
+
+            List<AutoTypeStep> steps = AutoType.Plan(passwordOnly ? "" : entry.Login, entry.Password, settings.AutoTypeEnter);
+            if (steps.Count == 0)
+            {
+                Flash(passwordOnly
+                    ? L.T("Пароль у этой записи не задан", "This entry has no password")
+                    : L.T("У этой записи нет ни логина, ни пароля — вводить нечего", "This entry has neither a username nor a password, there is nothing to type"));
+                return;
+            }
+
+            AutoTypeSystem system = AutoType.Driver;
+            FormWindowState before = WindowState;
+            system.Minimize(this);
+
+            string title;
+            AutoTypeResult result = AutoType.Run(steps, out title);
+            idle.Reset();
+            if (result == AutoTypeResult.Done)
+            {
+                Flash(L.F("Введено в окно «{0}»", "Typed into the window “{0}”", Ui.Shorten(title, 60)));
+                return;
+            }
+
+            // Ввод не состоялся — возвращаем окно, чтобы объяснить почему.
+            system.Restore(this, before);
+            if (result == AutoTypeResult.NoTarget)
+            {
+                Flash(L.T("Некуда вводить. Сначала щёлкните в поле на сайте или в программе, затем вернитесь в KeyBox и нажмите «Автоввод»",
+                          "Nowhere to type. Click the field on the website or in the program first, then come back to KeyBox and press “Auto-type”"));
+            }
+            else if (result == AutoTypeResult.Interrupted)
+            {
+                Flash(L.T("Автоввод остановлен: сменилось активное окно или была зажата клавиша", "Auto-type stopped: the active window changed or a key was held down"));
+            }
+            else
+            {
+                Flash(L.T("Автоввод не удался: Windows не приняла нажатия", "Auto-type failed: Windows did not accept the keystrokes"));
+            }
         }
 
         /// <summary>Открывает сайт записи в браузере.</summary>
@@ -1926,6 +1992,12 @@ namespace KeyBox.UI
                 case Keys.Control | Keys.L:
                     RequestLock(true);
                     return true;
+                case Keys.Control | Keys.T:
+                    AutoTypeEntry(false);
+                    return true;
+                case Keys.Control | Keys.Shift | Keys.T:
+                    AutoTypeEntry(true);
+                    return true;
                 case Keys.Escape:
                     if (txtSearch.Text.Length > 0)
                     {
@@ -1958,7 +2030,8 @@ namespace KeyBox.UI
                 }
             }
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(Ui.S(1000), Ui.S(600));
+            // При такой ширине все кнопки панели помещаются с подписями на обоих языках (это проверяют тесты).
+            ClientSize = new Size(Ui.S(1040), Ui.S(620));
         }
 
         protected override void OnShown(EventArgs e)
