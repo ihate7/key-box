@@ -48,9 +48,11 @@ namespace KeyBox.UI
         private ToolStripButton btnAdd;
         private ToolStripButton btnEdit;
         private ToolStripButton btnDelete;
+        private ToolStripButton btnRestore;
         private ToolStripButton btnCopyLogin;
         private ToolStripButton btnCopyPassword;
         private ToolStripDropDownButton btnMove;
+        private ToolStripSeparator sepMove;
         private ToolStripButton btnShow;
         private ToolStripButton btnLock;
         private ToolStripDropDownButton btnMore;
@@ -136,6 +138,9 @@ namespace KeyBox.UI
             tick.Tick += OnTick;
             tick.Start();
 
+            // Записи, пролежавшие в корзине дольше срока, стираются окончательно при открытии хранилища.
+            if (Data.PurgeTrash(VaultData.TrashDays, DateTime.UtcNow) > 0) TrySaveQuietly();
+
             RefreshAll();
             UpdateStatus();
             ActiveControl = lvEntries;
@@ -173,6 +178,9 @@ namespace KeyBox.UI
             btnAdd = ToolButton("btnAdd", L.T("Добавить", "Add"), Ui.GlyphAdd, L.T("Новая запись (Ins)", "New entry (Ins)"), true, delegate { AddEntry(); });
             btnEdit = ToolButton("btnEdit", L.T("Изменить", "Edit"), Ui.GlyphEdit, L.T("Изменить запись (Enter)", "Edit entry (Enter)"), true, delegate { EditEntry(); });
             btnDelete = ToolButton("btnDelete", L.T("Удалить", "Delete"), Ui.GlyphDelete, L.T("Удалить выбранные записи (Del)", "Delete selected entries (Del)"), true, delegate { DeleteEntries(); });
+            btnRestore = ToolButton("btnRestore", L.T("Восстановить", "Restore"), Ui.GlyphUndo,
+                L.T("Вернуть выбранные записи из корзины", "Bring the selected entries back from the trash"), true, delegate { RestoreEntries(); });
+            btnRestore.Visible = false;
             btnCopyLogin = ToolButton("btnCopyLogin", L.T("Логин", "Username"), Ui.GlyphCopy, L.T("Копировать логин (Ctrl+B)", "Copy username (Ctrl+B)"), true, delegate { CopyField(false); });
             btnCopyPassword = ToolButton("btnCopyPassword", L.T("Пароль", "Password"), Ui.GlyphCopy, L.T("Копировать пароль (Ctrl+C)", "Copy password (Ctrl+C)"), true, delegate { CopyField(true); });
 
@@ -223,10 +231,11 @@ namespace KeyBox.UI
                 NativeMethods.SendMessage(txtSearch.TextBox.Handle, NativeMethods.EM_SETCUEBANNER, (IntPtr)1, L.T("Поиск", "Search"));
             };
 
+            sepMove = new ToolStripSeparator();
             toolbar.Items.AddRange(new ToolStripItem[]
             {
-                btnAdd, btnEdit, btnDelete, new ToolStripSeparator(),
-                btnCopyLogin, btnCopyPassword, new ToolStripSeparator(),
+                btnAdd, btnEdit, btnDelete, btnRestore, new ToolStripSeparator(),
+                btnCopyLogin, btnCopyPassword, sepMove,
                 btnMove, new ToolStripSeparator(),
                 btnShow,
                 btnMore, btnLock, txtSearch
@@ -410,30 +419,55 @@ namespace KeyBox.UI
             ToolStripMenuItem miOpenSite = MenuItem(L.T("Открыть сайт", "Open website"), "Ctrl+U", delegate { OpenWebsite(); });
             miOpenSite.Name = "miOpenSite";
             ToolStripMenuItem miEdit = MenuItem(L.T("Изменить…", "Edit…"), "Enter", delegate { EditEntry(); });
+            miEdit.Name = "miEdit";
+            ToolStripMenuItem miHistory = MenuItem(L.T("Прежние пароли…", "Previous passwords…"), null, delegate { ShowHistory(); });
+            miHistory.Name = "miHistory";
             var miMove = new ToolStripMenuItem(L.T("Переместить в группу", "Move to group"));
+            miMove.Name = "miMove";
             miMove.DropDownItems.Add(new ToolStripMenuItem("…"));
             StyleMenu(miMove.DropDown);
             miMove.DropDownOpening += delegate { PopulateMoveMenu(miMove.DropDownItems); };
+            ToolStripMenuItem miRestore = MenuItem(L.T("Восстановить", "Restore"), null, delegate { RestoreEntries(); });
+            miRestore.Name = "miRestore";
             ToolStripMenuItem miDelete = MenuItem(L.T("Удалить", "Delete"), "Del", delegate { DeleteEntries(); });
+            miDelete.Name = "miDelete";
+            ToolStripMenuItem miEmptyTrash = MenuItem(L.T("Очистить корзину…", "Empty the trash…"), null, delegate { EmptyTrash(); });
+            miEmptyTrash.Name = "miEmptyTrash";
+            var beforeAdd = new ToolStripSeparator();
             ToolStripMenuItem miAdd = MenuItem(L.T("Новая запись…", "New entry…"), "Ins", delegate { AddEntry(); });
+            miAdd.Name = "miAdd";
 
             entryMenu.Items.AddRange(new ToolStripItem[]
             {
                 miCopyPassword, miCopyLogin, miCopyCode, miOpenSite, new ToolStripSeparator(),
-                miEdit, miMove, miDelete, new ToolStripSeparator(),
+                miEdit, miHistory, miMove, miRestore, miDelete, miEmptyTrash, beforeAdd,
                 miAdd
             });
             entryMenu.Opening += delegate
             {
                 int selected = lvEntries.SelectedItems.Count;
                 Entry single = SingleSelected();
+                bool inTrash = filter.Kind == FilterKind.Trash;
+
                 miCopyPassword.Enabled = selected == 1;
                 miCopyLogin.Enabled = selected == 1;
                 miCopyCode.Enabled = single != null && single.Totp != null;
                 miOpenSite.Enabled = single != null && single.Url != null;
+                miHistory.Enabled = single != null && single.History != null && single.History.Count > 0;
+
+                // В корзине запись можно только восстановить или стереть окончательно.
+                miEdit.Visible = !inTrash;
+                miMove.Visible = !inTrash;
+                miRestore.Visible = inTrash;
+                miEmptyTrash.Visible = inTrash;
+                beforeAdd.Visible = !inTrash;
+                miAdd.Visible = !inTrash;
+
                 miEdit.Enabled = selected == 1;
                 miMove.Enabled = selected > 0;
+                miRestore.Enabled = selected > 0;
                 miDelete.Enabled = selected > 0;
+                miDelete.Text = inTrash ? L.T("Удалить навсегда", "Delete permanently") : L.T("Удалить", "Delete");
             };
             lvEntries.ContextMenuStrip = entryMenu;
 
@@ -443,12 +477,18 @@ namespace KeyBox.UI
             ToolStripMenuItem miGroupAdd = MenuItem(L.T("Новая группа…", "New group…"), "Ctrl+G", delegate { AddGroup(); });
             ToolStripMenuItem miGroupEdit = MenuItem(L.T("Изменить…", "Edit…"), "F2", delegate { EditGroup(); });
             ToolStripMenuItem miGroupDelete = MenuItem(L.T("Удалить группу", "Delete group"), "Del", delegate { DeleteGroup(); });
-            groupMenu.Items.AddRange(new ToolStripItem[] { miGroupAdd, new ToolStripSeparator(), miGroupEdit, miGroupDelete });
+            ToolStripMenuItem miTrashEmpty = MenuItem(L.T("Очистить корзину…", "Empty the trash…"), "Del", delegate { EmptyTrash(); });
+            miTrashEmpty.Name = "miTrashEmpty";
+            groupMenu.Items.AddRange(new ToolStripItem[] { miGroupAdd, new ToolStripSeparator(), miGroupEdit, miGroupDelete, miTrashEmpty });
             groupMenu.Opening += delegate
             {
                 bool isGroup = SelectedGroup() != null;
+                bool isTrash = filter.Kind == FilterKind.Trash;
                 miGroupEdit.Enabled = isGroup;
                 miGroupDelete.Enabled = isGroup;
+                miGroupEdit.Visible = !isTrash;
+                miGroupDelete.Visible = !isTrash;
+                miTrashEmpty.Visible = isTrash;
             };
             treeGroups.ContextMenuStrip = groupMenu;
         }
@@ -493,6 +533,7 @@ namespace KeyBox.UI
 
             int ungrouped;
             Dictionary<string, int> counts = Data.CountByGroup(out ungrouped);
+            int trashed = Data.TrashCount;
 
             refreshing = true;
             treeGroups.BeginUpdate();
@@ -500,7 +541,7 @@ namespace KeyBox.UI
             {
                 treeGroups.Nodes.Clear();
 
-                TreeNode all = MakeGroupNode(FilterKind.All, null, L.T("Все записи", "All entries"), Data.Entries.Count);
+                TreeNode all = MakeGroupNode(FilterKind.All, null, L.T("Все записи", "All entries"), Data.LiveCount);
                 treeGroups.Nodes.Add(all);
 
                 // Родительская группа в этом порядке всегда идёт раньше своих подгрупп.
@@ -523,6 +564,14 @@ namespace KeyBox.UI
                 TreeNode none = MakeGroupNode(FilterKind.Ungrouped, null, L.T("Без группы", "No group"), ungrouped);
                 treeGroups.Nodes.Add(none);
 
+                // Корзина видна, только пока в ней что-то лежит (или пока она открыта).
+                TreeNode trash = null;
+                if (trashed > 0 || filter.Kind == FilterKind.Trash)
+                {
+                    trash = MakeGroupNode(FilterKind.Trash, null, L.T("Корзина", "Trash"), trashed);
+                    treeGroups.Nodes.Add(trash);
+                }
+
                 // Ветки раскрыты, кроме тех, что пользователь свернул сам.
                 foreach (KeyValuePair<string, TreeNode> pair in nodes)
                 {
@@ -531,6 +580,7 @@ namespace KeyBox.UI
 
                 TreeNode selected;
                 if (filter.Kind == FilterKind.Group) selected = nodes[filter.GroupId];
+                else if (filter.Kind == FilterKind.Trash) selected = trash;
                 else selected = filter.Kind == FilterKind.Ungrouped ? none : all;
                 treeGroups.SelectedNode = selected;
             }
@@ -706,7 +756,13 @@ namespace KeyBox.UI
             }
 
             string text;
-            if (Data.Entries.Count == 0)
+            if (filter.Kind == FilterKind.Trash)
+            {
+                text = txtSearch.Text.Trim().Length > 0
+                    ? L.T("Ничего не найдено.", "Nothing found.")
+                    : L.T("Корзина пуста.", "The trash is empty.");
+            }
+            else if (Data.LiveCount == 0)
             {
                 text = L.T("Здесь пока пусто.\nНажмите «Добавить», чтобы создать первую запись.", "Nothing here yet.\nClick “Add” to create the first entry.");
             }
@@ -745,20 +801,37 @@ namespace KeyBox.UI
 
         private void UpdateCount(int shown)
         {
-            int total = Data.Entries.Count;
-            lblCount.Text = shown == total
-                ? L.F("Записей: {0}", "Entries: {0}", total)
-                : L.F("Показано: {0} из {1}", "Showing {0} of {1}", shown, total);
+            bool inTrash = filter.Kind == FilterKind.Trash;
+            int total = inTrash ? Data.TrashCount : Data.LiveCount;
+            if (shown != total)
+            {
+                lblCount.Text = L.F("Показано: {0} из {1}", "Showing {0} of {1}", shown, total);
+            }
+            else
+            {
+                lblCount.Text = inTrash
+                    ? L.F("В корзине: {0}", "In the trash: {0}", total)
+                    : L.F("Записей: {0}", "Entries: {0}", total);
+            }
         }
 
         private void UpdateCommands()
         {
             int selected = lvEntries.SelectedItems.Count;
-            btnEdit.Enabled = selected == 1;
+            bool inTrash = filter.Kind == FilterKind.Trash;
+            // В корзине запись можно только восстановить или стереть: «Изменить» и «В группу»
+            // уступают место кнопке «Восстановить».
+            btnEdit.Visible = !inTrash;
+            btnMove.Visible = !inTrash;
+            sepMove.Visible = !inTrash;
+            btnRestore.Visible = inTrash;
+
+            btnEdit.Enabled = selected == 1 && !inTrash;
             btnDelete.Enabled = selected > 0;
+            btnRestore.Enabled = selected > 0;
             btnCopyLogin.Enabled = selected == 1;
             btnCopyPassword.Enabled = selected == 1;
-            btnMove.Enabled = selected > 0;
+            btnMove.Enabled = selected > 0 && !inTrash;
 
             bool isGroup = filter.Kind == FilterKind.Group;
             btnGroupEdit.Enabled = isGroup;
@@ -983,6 +1056,11 @@ namespace KeyBox.UI
             if (ids.Length != 1) return;
             Entry entry = Data.FindEntry(ids[0]);
             if (entry == null) return;
+            if (entry.IsDeleted)
+            {
+                Flash(L.T("Запись в корзине. Чтобы изменить её, сначала восстановите.", "The entry is in the trash. Restore it first to edit it."));
+                return;
+            }
 
             using (var dialog = new EntryForm(Data, entry, entry.GroupId))
             {
@@ -1007,29 +1085,124 @@ namespace KeyBox.UI
             }
         }
 
+        /// <summary>
+        /// Удаляет выбранные записи. Из обычного списка они уходят в корзину, откуда их можно
+        /// вернуть; из корзины — стираются окончательно, и об этом программа спрашивает.
+        /// </summary>
         internal void DeleteEntries()
         {
             string[] ids = SelectedIds();
             if (ids.Length == 0) return;
 
-            string question;
-            if (ids.Length == 1)
+            if (filter.Kind == FilterKind.Trash)
             {
-                Entry entry = Data.FindEntry(ids[0]);
-                question = L.F("Удалить запись «{0}»?\n\nВосстановить её будет нельзя.",
-                    "Delete the entry “{0}”?\n\nIt cannot be restored.", TitleOf(entry));
+                DeleteForever(ids);
             }
             else
             {
-                question = L.F("Удалить {0}?\n\nВосстановить их будет нельзя.", "Delete {0}?\n\nThey cannot be restored.",
+                TrashEntries(ids);
+            }
+        }
+
+        private void TrashEntries(string[] ids)
+        {
+            int moved = Data.TrashEntries(ids);
+            if (moved == 0) return;
+
+            SaveVault();
+            RefreshAll();
+            Flash(L.F("В корзину: {0}. Вернуть можно в течение {1} дней", "Moved to the trash: {0}. It can be restored within {1} days",
+                L.Plural(moved, "запись", "записи", "записей", "entry", "entries"), VaultData.TrashDays));
+        }
+
+        private void DeleteForever(string[] ids)
+        {
+            string question;
+            if (ids.Length == 1)
+            {
+                question = L.F("Удалить запись «{0}» навсегда?\n\nВосстановить её будет нельзя.",
+                    "Delete the entry “{0}” permanently?\n\nIt cannot be restored.", TitleOf(Data.FindEntry(ids[0])));
+            }
+            else
+            {
+                question = L.F("Удалить навсегда {0}?\n\nВосстановить их будет нельзя.", "Permanently delete {0}?\n\nThey cannot be restored.",
                     L.Plural(ids.Length, "выбранную запись", "выбранные записи", "выбранных записей", "selected entry", "selected entries"));
             }
-            if (!MsgBox.ConfirmDanger(this, L.T("Удаление", "Delete"), question, L.T("Удалить", "Delete")) || LockRequested) return;
+            if (!MsgBox.ConfirmDanger(this, L.T("Удаление", "Delete"), question, L.T("Удалить навсегда", "Delete permanently")) || LockRequested) return;
 
             int removed = Data.DeleteEntries(ids);
             SaveVault();
+            if (Data.TrashCount == 0) filter = GroupFilter.All;
             RefreshAll();
-            Flash(L.F("Удалено: {0}", "Deleted: {0}", L.Plural(removed, "запись", "записи", "записей", "entry", "entries")));
+            Flash(L.F("Удалено навсегда: {0}", "Permanently deleted: {0}", L.Plural(removed, "запись", "записи", "записей", "entry", "entries")));
+        }
+
+        /// <summary>Возвращает выбранные записи из корзины туда, где они лежали.</summary>
+        internal void RestoreEntries()
+        {
+            string[] ids = SelectedIds();
+            if (ids.Length == 0 || filter.Kind != FilterKind.Trash) return;
+
+            int restored = Data.RestoreEntries(ids);
+            if (restored == 0) return;
+            SaveVault();
+
+            Entry single = ids.Length == 1 ? Data.FindEntry(ids[0]) : null;
+            if (single != null)
+            {
+                // Показываем запись там, куда она вернулась.
+                RevealEntry(single);
+            }
+            else
+            {
+                if (Data.TrashCount == 0) filter = GroupFilter.All;
+                RefreshAll();
+            }
+            Flash(L.F("Восстановлено: {0}", "Restored: {0}", L.Plural(restored, "запись", "записи", "записей", "entry", "entries")));
+        }
+
+        /// <summary>Окончательно стирает всё, что лежит в корзине.</summary>
+        internal void EmptyTrash()
+        {
+            int count = Data.TrashCount;
+            if (count == 0) return;
+
+            string question = L.F("Удалить навсегда всё, что лежит в корзине ({0})?\n\nВосстановить эти записи будет нельзя.",
+                "Permanently delete everything in the trash ({0})?\n\nThese entries cannot be restored.",
+                L.Plural(count, "запись", "записи", "записей", "entry", "entries"));
+            if (!MsgBox.ConfirmDanger(this, L.T("Очистка корзины", "Empty the trash"), question, L.T("Очистить корзину", "Empty the trash")) || LockRequested) return;
+
+            Data.EmptyTrash();
+            SaveVault();
+            if (filter.Kind == FilterKind.Trash) filter = GroupFilter.All;
+            RefreshAll();
+            Flash(L.T("Корзина очищена", "The trash is empty now"));
+        }
+
+        /// <summary>Показывает прежние пароли выбранной записи.</summary>
+        internal void ShowHistory()
+        {
+            Entry entry = SingleSelected();
+            if (entry == null) return;
+            if (entry.History == null || entry.History.Count == 0)
+            {
+                Flash(L.T("У этой записи нет прежних паролей", "This entry has no previous passwords"));
+                return;
+            }
+
+            bool clear;
+            using (var dialog = new HistoryForm(entry, TitleOf(entry), ClipboardClearSeconds))
+            {
+                dialog.ShowDialog(this);
+                clear = dialog.ClearRequested;
+            }
+            if (!clear || LockRequested) return;
+
+            if (Data.ClearHistory(entry.Id))
+            {
+                SaveVault();
+                Flash(L.T("Прежние пароли стёрты", "Previous passwords erased"));
+            }
         }
 
         private static string TitleOf(Entry entry)
@@ -1453,7 +1626,7 @@ namespace KeyBox.UI
                 Ui.FitPath(session.FilePath, Ui.Font, MsgBox.TextWidth),
                 session.Iterations.ToString("N0"),
                 L.Plural(Data.Groups.Count, "группа", "группы", "групп", "group", "groups"),
-                L.Plural(Data.Entries.Count, "запись", "записи", "записей", "entry", "entries"),
+                L.Plural(Data.LiveCount, "запись", "записи", "записей", "entry", "entries"),
                 AutoLockMinutes, ClipboardClearSeconds);
             MsgBox.Info(this, L.T("О программе", "About"), text);
         }
@@ -1495,7 +1668,7 @@ namespace KeyBox.UI
 
             bool hasSearch = txtSearch.Text.Trim().Length > 0;
             // Поиск начинается по всем группам сразу: искать «не там» — частая причина «не нашлось».
-            if (hasSearch && !hadSearch && filter.Kind != FilterKind.All)
+            if (hasSearch && !hadSearch && filter.Kind != FilterKind.All && filter.Kind != FilterKind.Trash)
             {
                 filter = GroupFilter.All;
                 RefreshGroups();
@@ -1530,7 +1703,8 @@ namespace KeyBox.UI
             }
             else if (e.KeyCode == Keys.Delete)
             {
-                DeleteGroup();
+                if (filter.Kind == FilterKind.Trash) EmptyTrash();
+                else DeleteGroup();
                 e.Handled = true;
             }
         }
@@ -1558,7 +1732,7 @@ namespace KeyBox.UI
 
             if (e.Data.GetDataPresent(DragFormat))
             {
-                // Записи — в любую группу или в «Без группы».
+                // Записи — в любую группу, в «Без группы» или в корзину.
                 return item != null && item.Kind != FilterKind.All ? node : null;
             }
 
@@ -1597,7 +1771,9 @@ namespace KeyBox.UI
             if (e.Data.GetDataPresent(DragFormat))
             {
                 var ids = e.Data.GetData(DragFormat) as string[];
-                if (ids != null) MoveEntries(ids, targetId);
+                if (ids == null) return;
+                if (item.Kind == FilterKind.Trash) TrashEntries(ids);
+                else MoveEntries(ids, targetId);
             }
             else if (e.Data.GetDataPresent(GroupDragFormat))
             {
@@ -1608,7 +1784,8 @@ namespace KeyBox.UI
 
         private void OnEntriesItemDrag(object sender, ItemDragEventArgs e)
         {
-            if (e.Button != MouseButtons.Left) return;
+            // Из корзины записи не перетаскиваются: их сначала восстанавливают.
+            if (e.Button != MouseButtons.Left || filter.Kind == FilterKind.Trash) return;
             string[] ids = SelectedIds();
             if (ids.Length == 0) return;
             lvEntries.DoDragDrop(new DataObject(DragFormat, ids), DragDropEffects.Move);

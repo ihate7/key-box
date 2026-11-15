@@ -108,7 +108,7 @@ namespace KeyBox.UI
         public override Color OverflowButtonGradientEnd { get { return Ui.HoverBack; } }
     }
 
-    /// <summary>Строка в списке групп: «Все записи», обычная группа или «Без группы».</summary>
+    /// <summary>Строка в дереве групп: «Все записи», обычная группа, «Без группы» или «Корзина».</summary>
     internal sealed class GroupItem
     {
         public FilterKind Kind;
@@ -124,6 +124,8 @@ namespace KeyBox.UI
                     return GroupFilter.ForGroup(Id);
                 case FilterKind.Ungrouped:
                     return GroupFilter.Ungrouped;
+                case FilterKind.Trash:
+                    return GroupFilter.Trash;
                 default:
                     return GroupFilter.All;
             }
@@ -152,6 +154,7 @@ namespace KeyBox.UI
         private readonly Bitmap iconAll;
         private readonly Bitmap iconGroup;
         private readonly Bitmap iconNone;
+        private readonly Bitmap iconTrash;
         private readonly Bitmap arrowClosed;
         private readonly Bitmap arrowOpen;
         private TreeNode dropNode;
@@ -174,6 +177,7 @@ namespace KeyBox.UI
             iconAll = Ui.Glyph(Ui.GlyphList, 16, Ui.GlyphColor);
             iconGroup = Ui.Glyph(Ui.GlyphFolder, 16, Ui.GlyphColor);
             iconNone = Ui.Glyph(Ui.GlyphPage, 16, Ui.Muted);
+            iconTrash = Ui.Glyph(Ui.GlyphDelete, 16, Ui.Muted);
             arrowClosed = Ui.Glyph(Ui.GlyphChevronRight, 10, Ui.Muted);
             arrowOpen = Ui.Glyph(Ui.GlyphChevronDown, 10, Ui.Muted);
         }
@@ -290,7 +294,8 @@ namespace KeyBox.UI
                 }
             }
 
-            Color textColor = (selected || drop) ? Ui.SelectedText : (item.Kind == FilterKind.Ungrouped ? Ui.Muted : ForeColor);
+            bool builtIn = item.Kind == FilterKind.Ungrouped || item.Kind == FilterKind.Trash;
+            Color textColor = (selected || drop) ? Ui.SelectedText : (builtIn ? Ui.Muted : ForeColor);
             Color countColor = (selected || drop) ? Ui.SelectedText : Ui.Muted;
 
             // Стрелка ветки, затем значок, название и справа — число записей.
@@ -310,7 +315,10 @@ namespace KeyBox.UI
             }
 
             int x = arrowArea.Right;
-            Bitmap icon = item.Kind == FilterKind.All ? iconAll : (item.Kind == FilterKind.Group ? iconGroup : iconNone);
+            Bitmap icon;
+            if (item.Kind == FilterKind.All) icon = iconAll;
+            else if (item.Kind == FilterKind.Group) icon = iconGroup;
+            else icon = item.Kind == FilterKind.Trash ? iconTrash : iconNone;
             if (icon != null)
             {
                 g.DrawImage(icon, x, bounds.Y + (bounds.Height - icon.Height) / 2, icon.Width, icon.Height);
@@ -354,7 +362,7 @@ namespace KeyBox.UI
         {
             if (disposing)
             {
-                foreach (Bitmap bitmap in new[] { iconAll, iconGroup, iconNone, arrowClosed, arrowOpen })
+                foreach (Bitmap bitmap in new[] { iconAll, iconGroup, iconNone, iconTrash, arrowClosed, arrowOpen })
                 {
                     if (bitmap != null) bitmap.Dispose();
                 }

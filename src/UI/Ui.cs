@@ -39,6 +39,7 @@ namespace KeyBox.UI
         public const int GlyphSettings = 0xE713;
         public const int GlyphRecycle = 0xE74D;
         public const int GlyphHistory = 0xE81C;
+        public const int GlyphUndo = 0xE7A7;
 
         /// <summary>Масштаб экрана: 1.0 при 100 %, 1.5 при 150 % и т. д.</summary>
         public static readonly float Scale;

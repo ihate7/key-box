@@ -130,6 +130,7 @@ namespace KeyBox.Tests
             Run("long texts do not break the layout", LongTexts);
             Run("nested groups: subgroups, paths, moving and deleting branches", NestedGroups);
             Run("website and one-time codes", WebsiteAndCodes);
+            Run("previous passwords of an entry", PasswordHistory);
             Run("about box", About);
             Run("failed save is reported and can be retried", SaveFailure);
             Run("every change is already on disk", Persistence);
@@ -268,6 +269,7 @@ namespace KeyBox.Tests
                     Run("clipboard: foreign content is never cleared", ClipboardForeignContent);
                     Run("clipboard: an empty password is not copied", ClipboardEmptyPassword);
                     Run("clipboard: one-time code", ClipboardOneTimeCode);
+                    Run("clipboard: a previous password from the history window", ClipboardHistoryCopy);
 
                     main.Close();
                     session.Dispose();
@@ -305,7 +307,8 @@ namespace KeyBox.Tests
                 Ui.GlyphAdd, Ui.GlyphEdit, Ui.GlyphDelete, Ui.GlyphCopy, Ui.GlyphEye, Ui.GlyphLock, Ui.GlyphMore,
                 Ui.GlyphFolder, Ui.GlyphMove, Ui.GlyphList, Ui.GlyphPage, Ui.GlyphRename,
                 Ui.GlyphInfo, Ui.GlyphWarning, Ui.GlyphError, Ui.GlyphQuestion,
-                Ui.GlyphChevronRight, Ui.GlyphChevronDown
+                Ui.GlyphChevronRight, Ui.GlyphChevronDown,
+                Ui.GlyphKeyboard, Ui.GlyphSettings, Ui.GlyphHistory, Ui.GlyphUndo
             };
 
             foreach (int glyph in glyphs)
@@ -412,6 +415,7 @@ namespace KeyBox.Tests
             Check(StatusText("lblCount") == "Записей: 0", "counter: " + StatusText("lblCount"));
 
             Check(Tool("toolbar", "btnAdd").Enabled, "'add' is enabled");
+            CheckToolbarFits("empty vault");
             Check(!Tool("toolbar", "btnEdit").Enabled && !Tool("toolbar", "btnDelete").Enabled, "'edit' and 'delete' need a selection");
             Check(!Tool("toolbar", "btnCopyLogin").Enabled && !Tool("toolbar", "btnCopyPassword").Enabled && !Tool("toolbar", "btnMove").Enabled, "copy and move need a selection");
             Check(!Tool("groupBar", "btnGroupEdit").Enabled && !Tool("groupBar", "btnGroupDelete").Enabled, "built-in rows cannot be renamed or deleted");
@@ -792,12 +796,14 @@ namespace KeyBox.Tests
                 Check(Find<TextBox>(f, "txtDescription").Text == "Ozon", "F2 opens the selected entry");
                 Click(f, "btnCancel");
             });
-            Drive<MsgBox>(delegate { Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box)
-            {
-                Check(Find<Label>(box, "lblText").Text.Contains("Ozon"), "Del asks about the selected entry");
-                Click(box, "btnCancel");
-            });
-            Check(Titles().Length == 8, "nothing is deleted after 'cancel'");
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Delete));
+            Check(Titles().Length == 7 && HasGroup("Корзина") && GroupCount("Корзина") == 1, "Del moves the selected entry to the trash");
+            SelectGroup("Корзина");
+            SelectEntries("Ozon");
+            ClickTool("toolbar", "btnRestore");
+            SelectGroup("Все записи");
+            Check(Titles().Length == 8 && !HasGroup("Корзина"), "and it can be brought back");
+            SelectEntries("Ozon");
 
             // Двойной щелчок / Enter по записи.
             Drive<EntryForm>(delegate { Raise(Entries, "OnItemActivate", EventArgs.Empty); }, delegate(EntryForm f) { Click(f, "btnCancel"); });
@@ -815,36 +821,105 @@ namespace KeyBox.Tests
 
         private static void DeleteEntry()
         {
+            const string title = "Хостинг: панель управления";
             SelectGroup("Все записи");
-            SelectEntries("Хостинг: панель управления");
+            SelectEntries(title);
 
+            // Удаление из списка — без вопросов: запись уходит в корзину.
+            ClickTool("toolbar", "btnDelete");
+            Entry hosting = FindEntry(title);
+            Check(Titles().Length == 7 && hosting != null && hosting.IsDeleted, "the entry leaves the list but is kept in the trash");
+            Check(StatusText("lblMessage").Contains("В корзину: 1 запись") && StatusText("lblMessage").Contains("30 дней"),
+                "status message: " + StatusText("lblMessage"));
+            Check(GroupCount("Работа") == 1 && GroupCount("Все записи") == 7 && GroupCount("Корзина") == 1, "counters after deletion");
+            Check(StatusText("lblCount") == "Записей: 7", "the counter does not include the trash: " + StatusText("lblCount"));
+            Check(!Tool("toolbar", "btnDelete").Enabled, "nothing is selected after deletion");
+            SetSearch("хостинг");
+            Check(Titles().Length == 0, "search does not find deleted entries");
+            SetSearch("");
+
+            // Корзина.
+            SelectGroup("Корзина");
+            SameList(new[] { title }, Titles(), "the trash shows the deleted entry");
+            Check(StatusText("lblCount") == "В корзине: 1", "counter in the trash: " + StatusText("lblCount"));
+            Check(Tool("toolbar", "btnRestore").Available && !Tool("toolbar", "btnRestore").Enabled, "'restore' appears in the trash and needs a selection");
+            SelectEntries(title);
+            Check(!Tool("toolbar", "btnEdit").Available && !Tool("toolbar", "btnMove").Available && Tool("toolbar", "btnRestore").Enabled,
+                "in the trash an entry can only be restored or deleted");
+            CheckToolbarFits("trash");
+            Check(Cell(title, 3) == "Работа", "the trash remembers where the entry was");
+            Raise(Entries, "OnItemActivate", EventArgs.Empty);
+            Check(StatusText("lblMessage").Contains("сначала восстановите"), "editing is refused: " + StatusText("lblMessage"));
+            SetSearch("нет такого");
+            Check(Titles().Length == 0 && SelectedGroup() == "Корзина" && Find<Label>(main, "lblEmpty").Text.Contains("Ничего не найдено"),
+                "search inside the trash stays in the trash");
+            SetSearch("");
+            SelectEntries(title);
+            Shot(main, "30-trash");
+
+            // Восстановление возвращает запись в её группу.
+            ClickTool("toolbar", "btnRestore");
+            Check(SelectedGroup() == "Работа" && SelectedTitles().Length == 1 && SelectedTitles()[0] == title, "the restored entry is shown in its group");
+            Check(!HasGroup("Корзина") && !Tool("toolbar", "btnRestore").Available && Tool("toolbar", "btnEdit").Available && Tool("toolbar", "btnMove").Available,
+                "the empty trash disappears, the usual buttons are back");
+            CheckToolbarFits("after the trash");
+            Check(StatusText("lblMessage").Contains("Восстановлено: 1 запись"), "status message: " + StatusText("lblMessage"));
+            Check(!hosting.IsDeleted && StatusText("lblCount") == "Показано: 2 из 8", "counter: " + StatusText("lblCount"));
+
+            // Окончательное удаление — только из корзины и с вопросом.
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Delete));
+            SelectGroup("Корзина");
+            SelectEntries(title);
             Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
             {
                 string text = Find<Label>(box, "lblText").Text;
-                Check(text.Contains("Хостинг: панель управления") && text.Contains("нельзя"), "question names the entry: " + text);
+                Check(text.Contains(title) && text.Contains("навсегда") && text.Contains("нельзя"), "question names the entry: " + text);
                 Check(box.ActiveControl == Find<Button>(box, "btnCancel"), "'cancel' is the default for a destructive action");
                 Shot(box, "11-confirm-delete");
                 Click(box, "btnCancel");
             });
-            Check(Titles().Length == 8, "cancel keeps the entry");
+            Check(Titles().Length == 1, "cancel keeps the entry in the trash");
 
             Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
-            Check(Titles().Length == 7 && FindEntry("Хостинг: панель управления") == null, "entry is deleted");
-            Check(StatusText("lblMessage").Contains("Удалено: 1 запись"), "status message: " + StatusText("lblMessage"));
-            Check(GroupCount("Работа") == 1, "group counter after deletion");
-            Check(!Tool("toolbar", "btnDelete").Enabled, "nothing is selected after deletion");
+            Check(FindEntry(title) == null && session.Data.Entries.Count == 7, "the entry is gone for good");
+            Check(SelectedGroup() == "Все записи" && !HasGroup("Корзина"), "the empty trash is closed");
+            Check(StatusText("lblMessage").Contains("Удалено навсегда: 1 запись"), "status message: " + StatusText("lblMessage"));
 
-            // Несколько записей сразу.
+            // Несколько записей сразу и «Очистить корзину».
             AddEntry("Временная 1", "tmp1", "p1", null);
             AddEntry("Временная 2", "tmp2", "p2", null);
             SelectGroup("Все записи");
             SelectEntries("Временная 1", "Временная 2");
-            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
+            ClickTool("toolbar", "btnDelete");
+            Check(Titles().Length == 7 && GroupCount("Корзина") == 2, "both entries are in the trash");
+            Check(StatusText("lblMessage").Contains("В корзину: 2 записи"), "status message: " + StatusText("lblMessage"));
+
+            SelectGroup("Корзина");
+            Drive<MsgBox>(delegate { Raise(Tree, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box)
             {
-                Check(Find<Label>(box, "lblText").Text.Contains("2 выбранные записи"), "question for several entries: " + Find<Label>(box, "lblText").Text);
-                Click(box, "btnOk");
+                string text = Find<Label>(box, "lblText").Text;
+                Check(text.Contains("2 записи") && text.Contains("навсегда"), "the question counts the entries: " + text);
+                Click(box, "btnCancel");
             });
-            Check(Titles().Length == 7, "both entries are deleted");
+            Check(GroupCount("Корзина") == 2, "cancel keeps the trash");
+            Drive<MsgBox>(delegate { Raise(Tree, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            Check(session.Data.Entries.Count == 7 && !HasGroup("Корзина") && SelectedGroup() == "Все записи", "the trash is emptied");
+            Check(StatusText("lblMessage") == "Корзина очищена", "status message: " + StatusText("lblMessage"));
+
+            // Перетаскивание записи на корзину — то же удаление.
+            AddEntry("Временная 3", "tmp3", "p3", null);
+            AddEntry("Временная 4", "tmp4", "p4", null);
+            SelectGroup("Все записи");
+            SelectEntries("Временная 3");
+            ClickTool("toolbar", "btnDelete");
+            var data = new DataObject("KeyBox.EntryIds", new[] { FindEntry("Временная 4").Id });
+            DragEventArgs over = DragArgs(data, "Корзина");
+            Raise(Tree, "OnDragOver", over);
+            Check(over.Effect == DragDropEffects.Move, "the trash accepts dragged entries");
+            Raise(Tree, "OnDragDrop", DragArgs(data, "Корзина"));
+            Check(FindEntry("Временная 4").IsDeleted && GroupCount("Корзина") == 2, "a dropped entry goes to the trash");
+            Drive<MsgBox>(delegate { main.EmptyTrash(); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            Check(session.Data.Entries.Count == 7, "temporary entries are removed");
         }
 
         private static void RenameAndDeleteGroup()
@@ -912,6 +987,9 @@ namespace KeyBox.Tests
             ClickTool("toolbar", "btnShow");
 
             // Вопрос с длинным названием не должен раздувать окно.
+            SelectEntries(Ui.SingleLine(longDescription));
+            ClickTool("toolbar", "btnDelete");
+            SelectGroup("Корзина");
             SelectEntries(Ui.SingleLine(longDescription));
             Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
             {
@@ -1033,6 +1111,134 @@ namespace KeyBox.Tests
             Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.Shift | Keys.C));
             Check(Clipboard.GetText() == copied && StatusText("lblMessage").Contains("нет ключа"), "no key: " + StatusText("lblMessage"));
             ClipboardGuard.ClearIfOwned();
+        }
+
+        private static void ClipboardHistoryCopy()
+        {
+            Entry mail = FindEntry("Почта Gmail");
+            session.Data.UpdateEntry(mail.Id, null, mail.Login, "Next-Password-1", mail.Description);
+
+            // Модальные окна здесь показывать нельзя, поэтому окно открывается обычным образом.
+            using (var form = new HistoryForm(mail, "Почта Gmail", 30))
+            {
+                form.Show();
+                Pump(100);
+                Click(form, "btnCopy");
+                Check(Clipboard.GetText() == "Qw7!kPz#2026mail", "the previous password is copied: " + Clipboard.GetText());
+                Check(Find<Label>(form, "lblInfo").Text.Contains("скопирован") && ClipboardGuard.Pending, "and will be cleared like any other");
+                form.Close();
+            }
+            ClipboardGuard.ClearIfOwned();
+        }
+
+        /// <summary>
+        /// Прежние пароли записи «Ozon»: при каждой смене пароля прежний запоминается.
+        /// В конце пароль и история возвращаются к исходному виду.
+        /// </summary>
+        private static void PasswordHistory()
+        {
+            const string original = "0z0n-Shop!55";
+            SelectGroup("Все записи");
+            SelectEntries("Ozon");
+
+            main.ShowHistory();
+            Pump(30);
+            Check(StatusText("lblMessage").Contains("нет прежних паролей"), "an entry without history: " + StatusText("lblMessage"));
+
+            foreach (string password in new[] { "0z0n-Second!56", "0z0n-Third!57" })
+            {
+                string value = password;
+                Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+                {
+                    Find<TextBox>(f, "txtPassword").Text = value;
+                    Click(f, "btnOk");
+                });
+            }
+            Entry ozon = FindEntry("Ozon");
+            Check(ozon.Password == "0z0n-Third!57" && ozon.History != null && ozon.History.Count == 2, "two previous passwords are kept");
+            Check(ozon.History[0].Password == "0z0n-Second!56" && ozon.History[1].Password == original, "newest first");
+
+            Drive<HistoryForm>(delegate { main.ShowHistory(); }, delegate(HistoryForm f)
+            {
+                ListView list = Find<ListView>(f, "lvHistory");
+                Check(list.Items.Count == 2 && list.Items[0].SubItems[1].Text == Mask && list.Items[1].SubItems[1].Text == Mask, "two masked rows");
+                Find<CheckBox>(f, "chkShow").Checked = true;
+                Check(list.Items[0].SubItems[1].Text == "0z0n-Second!56" && list.Items[1].SubItems[1].Text == original, "passwords are shown on request");
+                Check(list.SelectedIndices.Count == 1 && Find<Button>(f, "btnCopy").Enabled, "a row is selected, so copying is available");
+                Shot(f, "31-password-history");
+                Click(f, "btnOk");
+            });
+            Check(ozon.History.Count == 2, "closing the window changes nothing");
+
+            // В окне записи видно, что прежние пароли есть.
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+            {
+                bool mentioned = false;
+                foreach (Label label in AllLabels(f))
+                {
+                    if (label.Text.Contains("прежних паролей: 2")) mentioned = true;
+                }
+                Check(mentioned, "the entry window mentions the previous passwords");
+                Click(f, "btnCancel");
+            });
+
+            // «Стереть все»: сначала отказ, затем согласие.
+            Drive<MsgBox>(delegate
+            {
+                Drive<HistoryForm>(delegate { main.ShowHistory(); }, delegate(HistoryForm f) { Click(f, "btnClear"); });
+            }, delegate(MsgBox box)
+            {
+                Check(Find<Label>(box, "lblText").Text.Contains("Стереть все прежние пароли"), "the question: " + Find<Label>(box, "lblText").Text);
+                Click(box, "btnCancel");
+            });
+            Check(ozon.History != null && ozon.History.Count == 2, "cancel keeps the history");
+
+            Drive<MsgBox>(delegate
+            {
+                Drive<HistoryForm>(delegate { main.ShowHistory(); }, delegate(HistoryForm f) { Click(f, "btnClear"); });
+            }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            Check(ozon.History == null && StatusText("lblMessage").Contains("стёрты"), "the history is erased: " + StatusText("lblMessage"));
+            using (VaultSession copy = VaultSession.Open(vaultPath, MasterPassword))
+            {
+                Check(copy.Data.FindEntry(ozon.Id).History == null, "and erased in the file");
+            }
+
+            // Возвращаем запись к исходному виду.
+            session.Data.UpdateEntry(ozon.Id, ozon.GroupId, ozon.Login, original, ozon.Description);
+            session.Data.ClearHistory(ozon.Id);
+            session.Save();
+        }
+
+        private static List<Label> AllLabels(Control root)
+        {
+            var labels = new List<Label>();
+            foreach (Control child in root.Controls)
+            {
+                var label = child as Label;
+                if (label != null) labels.Add(label);
+                labels.AddRange(AllLabels(child));
+            }
+            return labels;
+        }
+
+        /// <summary>Ни одна кнопка главной панели не должна уйти в выпадающее меню «не поместилось».</summary>
+        private static void CheckToolbarFits(string where)
+        {
+            Pump(30);
+            foreach (ToolStripItem item in Find<ToolStrip>(main, "toolbar").Items)
+            {
+                if (item.Available && item.IsOnOverflow)
+                {
+                    throw new Exception("the toolbar does not fit (" + where + "): " + item.Name + " is pushed out");
+                }
+            }
+        }
+
+        /// <summary>Удаляет выбранные записи окончательно: сначала в корзину, затем корзина очищается.</summary>
+        private static void DeleteSelectedForever()
+        {
+            ClickTool("toolbar", "btnDelete");
+            Drive<MsgBox>(delegate { main.EmptyTrash(); }, delegate(MsgBox box) { Click(box, "btnOk"); });
         }
 
         /// <summary>
@@ -1346,7 +1552,7 @@ namespace KeyBox.Tests
 
             // Убираем добавленное: остаются прежние две группы и семь записей.
             SelectEntries("Сервер сборки", "Тестовый стенд");
-            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            DeleteSelectedForever();
             SelectGroup("Все записи");
             Check(session.Data.Groups.Count == 2 && session.Data.Entries.Count == 7 && Cell("GitLab — рабочий", 3) == "Работа и проекты",
                 "the vault is back to its previous shape");
@@ -1424,7 +1630,7 @@ namespace KeyBox.Tests
             // Убираем за собой.
             SelectGroup("Все записи");
             SelectEntries("Запись при сбое");
-            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            DeleteSelectedForever();
             SelectGroup("Группа при сбое");
             Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
         }
@@ -1676,6 +1882,7 @@ namespace KeyBox.Tests
                 Check(StatusText("lblCount") == "Entries: 3", "counter: " + StatusText("lblCount"));
                 SameList(new[] { "All entries", "Work", "> Servers", "No group" }, GroupNames(), "tree");
                 CheckEnglish(main);
+                CheckToolbarFits("English");
                 Shot(main, "en-02-main");
 
                 Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
@@ -1686,12 +1893,34 @@ namespace KeyBox.Tests
                     Click(f, "btnCancel");
                 });
 
+                // Корзина: удаление, вопрос об окончательном удалении, восстановление.
+                ClickTool("toolbar", "btnDelete");
+                Check(StatusText("lblMessage").StartsWith("Moved to the trash: 1 entry"), "status: " + StatusText("lblMessage"));
+                SelectGroup("Trash");
+                SelectEntries("GitLab");
+                Check(StatusText("lblCount") == "In the trash: 1", "counter: " + StatusText("lblCount"));
+                CheckEnglish(main);
+                CheckToolbarFits("trash, English");
                 Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box)
                 {
                     CheckEnglish(box);
                     Check(Find<Label>(box, "lblText").Text.Contains("GitLab"), "the question names the entry");
                     Click(box, "btnCancel");
                 });
+                ClickTool("toolbar", "btnRestore");
+                Check(StatusText("lblMessage") == "Restored: 1 entry" && SelectedGroup() == "Work", "restored: " + StatusText("lblMessage"));
+
+                // Прежние пароли.
+                Entry gitlab = FindEntry("GitLab");
+                session.Data.UpdateEntry(gitlab.Id, gitlab.GroupId, gitlab.Login, "glpat-Second-2", gitlab.Description);
+                SelectEntries("GitLab");
+                Drive<HistoryForm>(delegate { main.ShowHistory(); }, delegate(HistoryForm f)
+                {
+                    CheckEnglish(f);
+                    Click(f, "btnOk");
+                });
+                SelectGroup("All entries");
+                SelectEntries("GitLab");
 
                 SelectGroup("Work");
                 Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box)

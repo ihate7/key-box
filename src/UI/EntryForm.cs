@@ -189,6 +189,11 @@ namespace KeyBox.UI
                 txtTotp.Text = entry.Totp ?? "";
 
                 string times = DescribeTimes(entry);
+                if (entry.History != null && entry.History.Count > 0)
+                {
+                    string history = L.F("прежних паролей: {0} (см. меню записи)", "previous passwords: {0} (see the entry menu)", entry.History.Count);
+                    times = times == null ? history : times + "  ·  " + history;
+                }
                 if (times != null)
                 {
                     Label info = Ui.MakeWrapLabel(times, ContentWidth, Ui.Muted);
