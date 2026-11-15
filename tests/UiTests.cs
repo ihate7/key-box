@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using KeyBox.Crypto;
 using KeyBox.UI;
 using KeyBox.Vault;
 using FormsTimer = System.Windows.Forms.Timer;
@@ -128,6 +129,7 @@ namespace KeyBox.Tests
             Run("groups: rename and delete", RenameAndDeleteGroup);
             Run("long texts do not break the layout", LongTexts);
             Run("nested groups: subgroups, paths, moving and deleting branches", NestedGroups);
+            Run("website and one-time codes", WebsiteAndCodes);
             Run("about box", About);
             Run("failed save is reported and can be retried", SaveFailure);
             Run("every change is already on disk", Persistence);
@@ -247,7 +249,12 @@ namespace KeyBox.Tests
                     vaultPath = Path.Combine(workDir, "clipboard-test.vault");
                     CleanUp();
                     session = VaultSession.Create(vaultPath, MasterPassword, VaultFormat.MinIterations);
-                    session.Data.AddEntry(null, "ivan.petrov@example.com", "Qw7!kPz#2026mail", "Почта Gmail");
+                    var mail = new EntryFields();
+                    mail.Login = "ivan.petrov@example.com";
+                    mail.Password = "Qw7!kPz#2026mail";
+                    mail.Description = "Почта Gmail";
+                    mail.Totp = "JBSWY3DPEHPK3PXP";
+                    session.Data.AddEntry(mail);
                     session.Data.AddEntry(null, "nopass", "", "Без пароля");
                     session.Save();
 
@@ -260,6 +267,7 @@ namespace KeyBox.Tests
                     Run("clipboard: cleared on demand and by the timer", ClipboardClearing);
                     Run("clipboard: foreign content is never cleared", ClipboardForeignContent);
                     Run("clipboard: an empty password is not copied", ClipboardEmptyPassword);
+                    Run("clipboard: one-time code", ClipboardOneTimeCode);
 
                     main.Close();
                     session.Dispose();
@@ -1004,6 +1012,127 @@ namespace KeyBox.Tests
             ClickTool("toolbar", "btnCopyLogin");
             Check(Clipboard.GetText() == "nopass", "the login of the same entry is copied");
             ClipboardGuard.ClearIfOwned();
+        }
+
+        private static void ClipboardOneTimeCode()
+        {
+            TotpKey key = Totp.Parse("JBSWY3DPEHPK3PXP");
+            SelectEntries("Почта Gmail");
+            DateTime before = DateTime.UtcNow;
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.Shift | Keys.C));
+            string copied = Clipboard.GetText();
+
+            Check(copied.Length == 6 && System.Text.RegularExpressions.Regex.IsMatch(copied, "^[0-9]{6}$"), "a six-digit code is in the clipboard: " + copied);
+            Check(copied == Totp.Code(key, before) || copied == Totp.Code(key, DateTime.UtcNow), "it is the code that is valid right now");
+            Check(StatusText("lblMessage").Contains("Код " + Totp.Readable(copied)) && StatusText("lblMessage").Contains("действует"),
+                "the code is shown in the status bar: " + StatusText("lblMessage"));
+            Check(ClipboardGuard.Pending && ClipboardGuard.Label == "Код", "the code will be cleared like a password");
+
+            // У записи без ключа копировать нечего; прежнее содержимое буфера не трогается.
+            SelectEntries("Без пароля");
+            Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.Shift | Keys.C));
+            Check(Clipboard.GetText() == copied && StatusText("lblMessage").Contains("нет ключа"), "no key: " + StatusText("lblMessage"));
+            ClipboardGuard.ClearIfOwned();
+        }
+
+        /// <summary>
+        /// Сайт и одноразовые коды. Запись «Почта Gmail» получает адрес сайта и ключ; они остаются
+        /// у неё до конца прогона — число записей и групп не меняется.
+        /// </summary>
+        private static void WebsiteAndCodes()
+        {
+            SelectGroup("Все записи");
+            SelectEntries("Почта Gmail");
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnEdit"); }, delegate(EntryForm f)
+            {
+                TextBox url = Find<TextBox>(f, "txtUrl");
+                TextBox key = Find<TextBox>(f, "txtTotp");
+                Label preview = Find<Label>(f, "lblTotp");
+                Label error = Find<Label>(f, "lblError");
+
+                Check(url.Text == "" && key.Text == "" && key.UseSystemPasswordChar, "the new fields are empty, the key is masked");
+                Check(preview.Text.Contains("Необязательно"), "hint under the key: " + preview.Text);
+
+                key.Text = "это не ключ";
+                Check(preview.Text.Contains("не распознан"), "a bad key is reported while typing: " + preview.Text);
+                Click(f, "btnOk");
+                Check(f.Visible && error.Visible && error.Text.Contains("не распознан"), "a bad key is not saved: " + error.Text);
+
+                key.Text = "JBSW Y3DP EHPK 3PXP";
+                Check(!error.Visible, "typing clears the error");
+                Check(System.Text.RegularExpressions.Regex.IsMatch(preview.Text, "^Код сейчас: [0-9]{3} [0-9]{3} "), "the current code is shown: " + preview.Text);
+                Find<CheckBox>(f, "chkShow").Checked = true;
+                Check(!key.UseSystemPasswordChar && !Find<TextBox>(f, "txtPassword").UseSystemPasswordChar, "the eye button reveals the key together with the password");
+
+                url.Text = "mail.example.com/inbox";
+                Shot(f, "29-entry-website-and-code");
+                Click(f, "btnOk");
+            });
+
+            Entry mail = FindEntry("Почта Gmail");
+            Check(mail.Url == "mail.example.com/inbox" && mail.Totp == "JBSW Y3DP EHPK 3PXP", "the website and the key are saved");
+            Check(StatusText("lblMessage") == "Запись сохранена", "status: " + StatusText("lblMessage"));
+            using (VaultSession copy = VaultSession.Open(vaultPath, MasterPassword))
+            {
+                Entry stored = copy.Data.FindEntry(mail.Id);
+                Check(stored.Url == mail.Url && stored.Totp == mail.Totp && copy.Data.Version == 3, "and written to the file");
+            }
+
+            // Поиск находит запись по адресу сайта.
+            SetSearch("mail.example");
+            SameList(new[] { "Почта Gmail" }, Titles(), "search by the website");
+            SetSearch("");
+
+            // Пункты меню записи.
+            var menu = Find<ListView>(main, "lvEntries").ContextMenuStrip;
+            Check(menu.Items.Find("miCopyCode", false).Length == 1 && menu.Items.Find("miOpenSite", false).Length == 1, "the entry menu has the new commands");
+
+            // «Открыть сайт»: браузер в тесте не запускается, адрес перехватывается.
+            string opened = null;
+            Ui.UrlLauncher = delegate(string address)
+            {
+                opened = address;
+                return true;
+            };
+            try
+            {
+                SelectEntries("Почта Gmail");
+                Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.U));
+                Check(opened == "https://mail.example.com/inbox", "Ctrl+U opens the website over https: " + opened);
+                Check(StatusText("lblMessage").Contains("mail.example.com"), "status: " + StatusText("lblMessage"));
+
+                opened = null;
+                SelectEntries("Ozon");
+                Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.U));
+                Check(opened == null && StatusText("lblMessage").Contains("не указан"), "an entry without a website: " + StatusText("lblMessage"));
+
+                // В поле «Сайт» может оказаться что угодно (например, из импортированного файла).
+                // Запустить по такому адресу программу или открыть файл нельзя.
+                session.Data.FindEntry(FindEntry("Ozon").Id).Url = "file:///C:/Windows/System32/calc.exe";
+                Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.U));
+                Check(opened == null && StatusText("lblMessage").Contains("не похоже"), "a file address is refused: " + StatusText("lblMessage"));
+                session.Data.FindEntry(FindEntry("Ozon").Id).Url = null;
+            }
+            finally
+            {
+                Ui.UrlLauncher = null;
+            }
+
+            Check(Ui.NormalizeUrl("example.com") == "https://example.com/" && Ui.NormalizeUrl("  http://example.com/a?b=1 ") == "http://example.com/a?b=1",
+                "addresses are completed: " + Ui.NormalizeUrl("example.com"));
+            Check(Ui.NormalizeUrl("router.local:8080/admin") == "https://router.local:8080/admin" && Ui.NormalizeUrl("192.168.1.1") == "https://192.168.1.1/",
+                "a port and a numeric address are fine: " + Ui.NormalizeUrl("router.local:8080/admin"));
+            string[] hostile =
+            {
+                "", "   ", "file:///C:/Windows/System32/calc.exe", "javascript:alert(1)", "calc.exe /c something",
+                "\\\\server\\share\\run.cmd", "C:\\Windows\\System32\\calc.exe", "mailto:someone@example.com", "ftp://example.com/file",
+                "cmd.exe\" /c \"calc", "ms-settings:privacy", "https://", "http:// example.com", "someone@example.com", "example.com:"
+            };
+            foreach (string address in hostile)
+            {
+                string result = Ui.NormalizeUrl(address);
+                Check(result == null, "not a website address: [" + address + "] gave " + result);
+            }
         }
 
         /// <summary>

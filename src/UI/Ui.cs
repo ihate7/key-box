@@ -35,6 +35,10 @@ namespace KeyBox.UI
         public const int GlyphQuestion = 0xE9CE;
         public const int GlyphChevronRight = 0xE76C;
         public const int GlyphChevronDown = 0xE70D;
+        public const int GlyphKeyboard = 0xE765;
+        public const int GlyphSettings = 0xE713;
+        public const int GlyphRecycle = 0xE74D;
+        public const int GlyphHistory = 0xE81C;
 
         /// <summary>Масштаб экрана: 1.0 при 100 %, 1.5 при 150 % и т. д.</summary>
         public static readonly float Scale;
@@ -298,6 +302,69 @@ namespace KeyBox.UI
                 toggle.AutoSize = true;
             }
             return toggle;
+        }
+
+        // ---------- Сайты ----------
+
+        /// <summary>Нужен тестам: вместо запуска браузера адрес передаётся сюда.</summary>
+        internal static Func<string, bool> UrlLauncher { get; set; }
+
+        /// <summary>
+        /// Приводит адрес сайта из записи к виду, который можно открыть в браузере:
+        /// «example.com» превращается в «https://example.com/». Возвращает null, если это не адрес сайта.
+        /// Открываются только адреса http и https: адрес берётся из данных (в том числе
+        /// импортированных из чужого файла), и запускать по нему что-либо другое нельзя.
+        /// </summary>
+        public static string NormalizeUrl(string url)
+        {
+            string value = (url ?? "").Trim();
+            if (value.Length == 0 || value.IndexOfAny(new[] { ' ', '\t', '\r', '\n', '"', '\\' }) >= 0) return null;
+            if (value.IndexOf("://", StringComparison.Ordinal) < 0)
+            {
+                // Без «https://» допустим только вид «сайт[:порт][/путь]». Строки вроде «mailto:…»
+                // или «javascript:…» и адреса почты — не сайты.
+                int slash = value.IndexOf('/');
+                string authority = slash < 0 ? value : value.Substring(0, slash);
+                if (authority.IndexOf('@') >= 0) return null;
+                int colon = authority.IndexOf(':');
+                if (colon >= 0)
+                {
+                    string port = authority.Substring(colon + 1);
+                    if (port.Length == 0) return null;
+                    foreach (char c in port)
+                    {
+                        if (c < '0' || c > '9') return null;
+                    }
+                }
+                value = "https://" + value;
+            }
+
+            Uri uri;
+            if (!Uri.TryCreate(value, UriKind.Absolute, out uri)) return null;
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return null;
+            if (string.IsNullOrEmpty(uri.Host)) return null;
+            return uri.AbsoluteUri;
+        }
+
+        /// <summary>Открывает адрес сайта в браузере по умолчанию. Возвращает false, если это не удалось.</summary>
+        public static bool OpenUrl(string url)
+        {
+            string target = NormalizeUrl(url);
+            if (target == null) return false;
+            if (UrlLauncher != null) return UrlLauncher(target);
+
+            try
+            {
+                var start = new System.Diagnostics.ProcessStartInfo(target);
+                start.UseShellExecute = true;
+                using (System.Diagnostics.Process.Start(start))
+                {
+                }
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception) { return false; }
+            catch (InvalidOperationException) { return false; }
+            catch (IOException) { return false; }
         }
 
         // ---------- Текст ----------

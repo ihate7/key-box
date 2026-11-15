@@ -4,11 +4,12 @@ using System.Drawing;
 using System.Windows.Forms;
 using KeyBox.Crypto;
 using KeyBox.Vault;
+using FormsTimer = System.Windows.Forms.Timer;
 
 namespace KeyBox.UI
 {
     /// <summary>
-    /// Создание и изменение записи: описание, логин, пароль и группа.
+    /// Создание и изменение записи: описание, сайт, логин, пароль, ключ одноразовых кодов и группа.
     /// Само хранилище окно не меняет — оно только возвращает введённые значения.
     /// </summary>
     internal sealed class EntryForm : DialogForm
@@ -24,11 +25,15 @@ namespace KeyBox.UI
             }
         }
 
+        private readonly FormsTimer codeTimer = new FormsTimer();
         private readonly TextBox txtDescription;
+        private readonly TextBox txtUrl;
         private readonly TextBox txtLogin;
         private readonly TextBox txtPassword;
         private readonly CheckBox chkShow;
         private readonly Button btnGenerate;
+        private readonly TextBox txtTotp;
+        private readonly Label lblTotp;
         private readonly ComboBox cmbGroup;
         private readonly Label lblError;
 
@@ -36,7 +41,7 @@ namespace KeyBox.UI
         /// <param name="entry">Изменяемая запись или null для новой.</param>
         /// <param name="groupId">Группа, выбранная изначально (null — без группы).</param>
         public EntryForm(VaultData data, Entry entry, string groupId)
-            : base(entry == null ? L.T("Новая запись", "New entry") : L.T("Изменение записи", "Edit entry"), 540)
+            : base(entry == null ? L.T("Новая запись", "New entry") : L.T("Изменение записи", "Edit entry"), 560)
         {
             Name = "EntryForm";
 
@@ -57,6 +62,15 @@ namespace KeyBox.UI
             txtDescription.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             txtDescription.Margin = new Padding(0, 0, 0, gap);
             AddRow(L.T("Описание", "Description"), txtDescription, true);
+
+            // Сайт
+            txtUrl = new TextBox();
+            txtUrl.Name = "txtUrl";
+            txtUrl.MaxLength = VaultData.MaxUrlLength;
+            txtUrl.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            txtUrl.Margin = new Padding(0, 0, 0, gap);
+            SetCue(txtUrl, "example.com");
+            AddRow(L.T("Сайт", "Website"), txtUrl, false);
 
             // Логин
             txtLogin = new TextBox();
@@ -100,6 +114,33 @@ namespace KeyBox.UI
             passwordRow.Controls.Add(btnGenerate, 2, 0);
             AddRow(L.T("Пароль", "Password"), passwordRow, false);
 
+            // Ключ одноразовых кодов: поле и строка под ним — подсказка, текущий код или ошибка.
+            var totpPanel = new TableLayoutPanel();
+            totpPanel.AutoSize = true;
+            totpPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            totpPanel.ColumnCount = 1;
+            totpPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            totpPanel.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            totpPanel.Margin = new Padding(0, 0, 0, gap);
+
+            txtTotp = new TextBox();
+            txtTotp.Name = "txtTotp";
+            txtTotp.UseSystemPasswordChar = true;
+            txtTotp.MaxLength = VaultData.MaxTotpLength;
+            txtTotp.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            txtTotp.Margin = Padding.Empty;
+            txtTotp.TextChanged += delegate { UpdateCodePreview(); };
+            SetCue(txtTotp, L.T("ключ с сайта или ссылка otpauth://", "key from the website or an otpauth:// link"));
+
+            lblTotp = Ui.MakeWrapLabel("", Ui.S(400), Ui.Muted);
+            lblTotp.Name = "lblTotp";
+            lblTotp.Font = Ui.SmallFont;
+            lblTotp.Margin = new Padding(0, Ui.S(4), 0, 0);
+
+            totpPanel.Controls.Add(txtTotp, 0, 0);
+            totpPanel.Controls.Add(lblTotp, 0, 1);
+            AddRow(L.T("Ключ 2FA", "2FA key"), totpPanel, true);
+
             // Группа
             cmbGroup = new ComboBox();
             cmbGroup.Name = "cmbGroup";
@@ -120,16 +161,32 @@ namespace KeyBox.UI
             Body.Controls.Add(lblError);
             Body.SetColumnSpan(lblError, 2);
 
+            // Замечание относится к прежнему вводу: стоит что-нибудь изменить — и оно убирается.
+            EventHandler clearError = delegate { Ui.ShowError(lblError, null); };
+            foreach (TextBox box in new[] { txtDescription, txtUrl, txtLogin, txtPassword, txtTotp })
+            {
+                box.TextChanged += clearError;
+            }
+
             var tips = new ToolTip();
-            tips.SetToolTip(chkShow, L.T("Показать пароль", "Show password"));
+            tips.SetToolTip(chkShow, L.T("Показать пароль и ключ", "Show the password and the key"));
             tips.SetToolTip(btnGenerate, L.F("Случайный пароль из {0} символов", "Random password of {0} characters", PasswordGenerator.DefaultLength));
-            Disposed += delegate { tips.Dispose(); };
+
+            codeTimer.Interval = 1000;
+            codeTimer.Tick += delegate { UpdateCodePreview(); };
+            Disposed += delegate
+            {
+                tips.Dispose();
+                codeTimer.Dispose();
+            };
 
             if (entry != null)
             {
                 txtDescription.Text = (entry.Description ?? "").Replace("\n", "\r\n");
+                txtUrl.Text = entry.Url ?? "";
                 txtLogin.Text = entry.Login;
                 txtPassword.Text = entry.Password;
+                txtTotp.Text = entry.Totp ?? "";
 
                 string times = DescribeTimes(entry);
                 if (times != null)
@@ -151,6 +208,7 @@ namespace KeyBox.UI
             SetButtons(ok, cancel, false);
 
             ActiveControl = txtDescription;
+            UpdateCodePreview();
         }
 
         public string Description
@@ -178,6 +236,22 @@ namespace KeyBox.UI
             }
         }
 
+        /// <summary>Все введённые значения разом.</summary>
+        public EntryFields Fields
+        {
+            get
+            {
+                var fields = new EntryFields();
+                fields.GroupId = GroupId;
+                fields.Login = Login;
+                fields.Password = Password;
+                fields.Description = Description;
+                fields.Url = txtUrl.Text;
+                fields.Totp = txtTotp.Text;
+                return fields;
+            }
+        }
+
         private void AddRow(string caption, Control field, bool alignTop)
         {
             Label label = Ui.MakeLabel(caption);
@@ -194,6 +268,15 @@ namespace KeyBox.UI
             }
             Body.Controls.Add(label);
             Body.Controls.Add(field);
+        }
+
+        /// <summary>Бледная подсказка в пустом поле ввода.</summary>
+        private static void SetCue(TextBox box, string text)
+        {
+            box.HandleCreated += delegate
+            {
+                NativeMethods.SendMessage(box.Handle, NativeMethods.EM_SETCUEBANNER, (IntPtr)1, text);
+            };
         }
 
         private void FillGroups(VaultData data, string selectedId)
@@ -238,10 +321,41 @@ namespace KeyBox.UI
             return L.T("Создано ", "Created ") + L.FormatTime(created) + L.T("  ·  изменено ", "  ·  modified ") + L.FormatTime(modified);
         }
 
+        /// <summary>Строка под ключом: подсказка, пока поле пустое; ошибка, если ключ не разобран; иначе — текущий код.</summary>
+        private void UpdateCodePreview()
+        {
+            string text = txtTotp.Text.Trim();
+            if (text.Length == 0)
+            {
+                codeTimer.Stop();
+                lblTotp.ForeColor = Ui.Muted;
+                lblTotp.Text = L.T("Необязательно: секретный ключ двухфакторной защиты — для одноразовых кодов.",
+                                   "Optional: the secret key of two-factor protection, for one-time codes.");
+                return;
+            }
+
+            TotpKey key = Totp.Parse(text);
+            if (key == null)
+            {
+                codeTimer.Stop();
+                lblTotp.ForeColor = Ui.Danger;
+                lblTotp.Text = L.T("Ключ не распознан: нужны буквы A–Z и цифры 2–7 или ссылка otpauth://.",
+                                   "The key is not recognised: use letters A–Z and digits 2–7, or an otpauth:// link.");
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            lblTotp.ForeColor = Ui.Success;
+            lblTotp.Text = L.F("Код сейчас: {0} · сменится через {1} с", "Code now: {0} · changes in {1} s",
+                Totp.Readable(Totp.Code(key, now)), Totp.SecondsLeft(key, now));
+            codeTimer.Start();
+        }
+
         private void OnShowChanged(object sender, EventArgs e)
         {
             txtPassword.UseSystemPasswordChar = !chkShow.Checked;
             txtPassword.Font = chkShow.Checked ? Ui.MonoFont : Ui.Font;
+            txtTotp.UseSystemPasswordChar = !chkShow.Checked;
         }
 
         private void OnGenerate(object sender, EventArgs e)
@@ -266,11 +380,17 @@ namespace KeyBox.UI
 
         private void OnOk(object sender, EventArgs e)
         {
-            string problem = VaultData.ValidateEntry(Login, Password, Description);
+            string problem = VaultData.ValidateEntry(Fields);
             if (problem != null)
             {
                 Ui.ShowError(lblError, problem);
-                txtDescription.Focus();
+                // Курсор — в поле, к которому относится замечание.
+                Control field = txtDescription;
+                if (VaultData.ValidateEntry(Login, Password, Description) == null)
+                {
+                    field = txtUrl.Text.Trim().Length > VaultData.MaxUrlLength ? txtUrl : txtTotp;
+                }
+                field.Focus();
                 return;
             }
             DialogResult = DialogResult.OK;

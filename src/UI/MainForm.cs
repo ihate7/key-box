@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using KeyBox.Crypto;
 using KeyBox.Vault;
 using FormsTimer = System.Windows.Forms.Timer;
 
@@ -404,6 +405,10 @@ namespace KeyBox.UI
 
             ToolStripMenuItem miCopyPassword = MenuItem(L.T("Копировать пароль", "Copy password"), "Ctrl+C", delegate { CopyField(true); });
             ToolStripMenuItem miCopyLogin = MenuItem(L.T("Копировать логин", "Copy username"), "Ctrl+B", delegate { CopyField(false); });
+            ToolStripMenuItem miCopyCode = MenuItem(L.T("Копировать одноразовый код", "Copy one-time code"), "Ctrl+Shift+C", delegate { CopyCode(); });
+            miCopyCode.Name = "miCopyCode";
+            ToolStripMenuItem miOpenSite = MenuItem(L.T("Открыть сайт", "Open website"), "Ctrl+U", delegate { OpenWebsite(); });
+            miOpenSite.Name = "miOpenSite";
             ToolStripMenuItem miEdit = MenuItem(L.T("Изменить…", "Edit…"), "Enter", delegate { EditEntry(); });
             var miMove = new ToolStripMenuItem(L.T("Переместить в группу", "Move to group"));
             miMove.DropDownItems.Add(new ToolStripMenuItem("…"));
@@ -414,15 +419,18 @@ namespace KeyBox.UI
 
             entryMenu.Items.AddRange(new ToolStripItem[]
             {
-                miCopyPassword, miCopyLogin, new ToolStripSeparator(),
+                miCopyPassword, miCopyLogin, miCopyCode, miOpenSite, new ToolStripSeparator(),
                 miEdit, miMove, miDelete, new ToolStripSeparator(),
                 miAdd
             });
             entryMenu.Opening += delegate
             {
                 int selected = lvEntries.SelectedItems.Count;
+                Entry single = SingleSelected();
                 miCopyPassword.Enabled = selected == 1;
                 miCopyLogin.Enabled = selected == 1;
+                miCopyCode.Enabled = single != null && single.Totp != null;
+                miOpenSite.Enabled = single != null && single.Url != null;
                 miEdit.Enabled = selected == 1;
                 miMove.Enabled = selected > 0;
                 miDelete.Enabled = selected > 0;
@@ -956,7 +964,7 @@ namespace KeyBox.UI
                 Entry entry;
                 try
                 {
-                    entry = Data.AddEntry(dialog.GroupId, dialog.Login, dialog.Password, dialog.Description);
+                    entry = Data.AddEntry(dialog.Fields);
                 }
                 catch (ValidationException ex)
                 {
@@ -983,7 +991,7 @@ namespace KeyBox.UI
                 bool changed;
                 try
                 {
-                    changed = Data.UpdateEntry(entry.Id, dialog.GroupId, dialog.Login, dialog.Password, dialog.Description);
+                    changed = Data.UpdateEntry(entry.Id, dialog.Fields);
                 }
                 catch (ValidationException ex)
                 {
@@ -1052,6 +1060,63 @@ namespace KeyBox.UI
             {
                 Flash(L.T("Не удалось скопировать: буфер обмена занят другой программой", "Could not copy: the clipboard is in use by another program"));
             }
+        }
+
+        /// <summary>Единственная выбранная запись или null, если выбрано не ровно одна.</summary>
+        private Entry SingleSelected()
+        {
+            string[] ids = SelectedIds();
+            return ids.Length == 1 ? Data.FindEntry(ids[0]) : null;
+        }
+
+        /// <summary>Копирует одноразовый код, действующий сейчас. Из буфера обмена он стирается так же, как пароль.</summary>
+        internal void CopyCode()
+        {
+            Entry entry = SingleSelected();
+            if (entry == null) return;
+
+            TotpKey key = Totp.Parse(entry.Totp);
+            if (key == null)
+            {
+                Flash(L.T("У этой записи нет ключа одноразовых кодов", "This entry has no one-time code key"));
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            string code = Totp.Code(key, now);
+            if (!ClipboardGuard.Copy(code, L.T("Код", "Code"), ClipboardClearSeconds))
+            {
+                Flash(L.T("Не удалось скопировать: буфер обмена занят другой программой", "Could not copy: the clipboard is in use by another program"));
+                return;
+            }
+            // Код виден в строке состояния: его удобно прочитать и набрать на другом устройстве.
+            Flash(L.F("Код {0} скопирован, действует ещё {1} с", "Code {0} copied, valid for another {1} s",
+                Totp.Readable(code), Totp.SecondsLeft(key, now)));
+        }
+
+        /// <summary>Открывает сайт записи в браузере.</summary>
+        internal void OpenWebsite()
+        {
+            Entry entry = SingleSelected();
+            if (entry == null) return;
+
+            if (string.IsNullOrEmpty(entry.Url))
+            {
+                Flash(L.T("У этой записи не указан сайт", "This entry has no website"));
+                return;
+            }
+            string address = Ui.NormalizeUrl(entry.Url);
+            if (address == null)
+            {
+                Flash(L.T("Это не похоже на адрес сайта — открыть его нельзя", "This does not look like a website address and cannot be opened"));
+                return;
+            }
+            if (!Ui.OpenUrl(address))
+            {
+                Flash(L.T("Не удалось открыть сайт в браузере", "Could not open the website in the browser"));
+                return;
+            }
+            Flash(L.F("Открыт сайт: {0}", "Website opened: {0}", Ui.Shorten(address, 70)));
         }
 
         private void MoveEntries(string[] ids, string groupId)
@@ -1561,9 +1626,17 @@ namespace KeyBox.UI
             {
                 EditEntry();
             }
+            else if (e.Control && e.Shift && !e.Alt && e.KeyCode == Keys.C)
+            {
+                CopyCode();
+            }
             else if (e.Control && !e.Alt && e.KeyCode == Keys.C)
             {
                 CopyField(true);
+            }
+            else if (e.Control && !e.Alt && e.KeyCode == Keys.U)
+            {
+                OpenWebsite();
             }
             else if (e.Control && !e.Alt && e.KeyCode == Keys.B)
             {
