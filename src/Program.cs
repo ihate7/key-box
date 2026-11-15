@@ -11,7 +11,7 @@ namespace KeyBox
     internal static class Program
     {
         public const string AppName = "KeyBox";
-        public const string Version = "1.0";
+        public const string Version = "1.1";
 
         /// <summary>Имя файла хранилища, который лежит рядом с программой.</summary>
         public const string DefaultVaultFileName = "keybox.vault";

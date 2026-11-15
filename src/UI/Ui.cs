@@ -33,6 +33,8 @@ namespace KeyBox.UI
         public const int GlyphWarning = 0xE7BA;
         public const int GlyphError = 0xEA39;
         public const int GlyphQuestion = 0xE9CE;
+        public const int GlyphChevronRight = 0xE76C;
+        public const int GlyphChevronDown = 0xE70D;
 
         /// <summary>Масштаб экрана: 1.0 при 100 %, 1.5 при 150 % и т. д.</summary>
         public static readonly float Scale;

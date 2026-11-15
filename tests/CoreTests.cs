@@ -60,6 +60,12 @@ namespace KeyBox.Tests
             Run("model: moving entries between groups", ModelMove);
             Run("model: deleting a group keeps its entries", ModelDeleteGroup);
             Run("model: filter and search", ModelQuery);
+            Run("nested groups: create, paths, tree order", NestedGroups);
+            Run("nested groups: move and rename, forbidden moves", NestedGroupsMove);
+            Run("nested groups: depth limit", NestedGroupsDepthLimit);
+            Run("nested groups: deleting a branch moves entries one level up", NestedGroupsDelete);
+            Run("nested groups: filter and search", NestedGroupsQuery);
+            Run("nested groups: file versions 1 and 2, broken links", NestedGroupsJson);
             Run("json: unicode and special characters", JsonSpecialCharacters);
             Run("json: damaged and foreign data", JsonNormalisation);
             Run("generator: alphabet, classes, uniqueness", GeneratorProperties);
@@ -599,9 +605,9 @@ namespace KeyBox.Tests
             ExpectValidation(delegate { data.RenameGroup(work.Id, ""); });
             ExpectValidation(delegate { data.RenameGroup("nope", "X"); });
 
-            Check(data.ValidateGroupName("Новая", null) == null, "validation accepts a new name");
-            Check(data.ValidateGroupName("Личное", home.Id) == null, "validation ignores the group itself");
-            Check(data.ValidateGroupName("Личное", null) != null, "validation reports a duplicate");
+            Check(data.ValidateGroupName("Новая", null, null) == null, "validation accepts a new name");
+            Check(data.ValidateGroupName("Личное", null, home.Id) == null, "validation ignores the group itself");
+            Check(data.ValidateGroupName("Личное", null, null) != null, "validation reports a duplicate");
         }
 
         private static void ModelEntries()
@@ -722,6 +728,269 @@ namespace KeyBox.Tests
             Check(GroupFilter.All.SameAs(GroupFilter.All) && !GroupFilter.All.SameAs(GroupFilter.Ungrouped), "filter comparison");
         }
 
+        // ---------- Вложенные группы ----------
+
+        /// <summary>Порядок соседних групп в тестах: по названию без учёта регистра.</summary>
+        private static int ByName(string a, string b)
+        {
+            return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string Names(List<Group> groups)
+        {
+            var names = new List<string>();
+            foreach (Group group in groups) names.Add(group.Name);
+            return string.Join(", ", names.ToArray());
+        }
+
+        private static int CountOf(string text, string part)
+        {
+            int count = 0;
+            for (int index = text.IndexOf(part, StringComparison.Ordinal); index >= 0; index = text.IndexOf(part, index + part.Length, StringComparison.Ordinal))
+            {
+                count++;
+            }
+            return count;
+        }
+
+        private static void NestedGroups()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            Group projects = data.AddGroup(" Проекты ", work.Id);
+            Group servers = data.AddGroup("Серверы", work.Id);
+            Group alpha = data.AddGroup("Альфа", projects.Id);
+            Group home = data.AddGroup("Личное");
+
+            Check(work.ParentId == null && home.ParentId == null, "top-level groups have no parent");
+            Check(projects.Name == "Проекты" && projects.ParentId == work.Id && alpha.ParentId == projects.Id && servers.ParentId == work.Id, "parent links");
+
+            Check(data.GroupPath(work.Id) == "Работа", "path of a top-level group");
+            Check(data.GroupPath(alpha.Id) == "Работа / Проекты / Альфа", "path of a nested group: " + data.GroupPath(alpha.Id));
+            Check(data.GroupPath(null) == null && data.GroupPath("nope") == null, "path of a missing group");
+            Check(data.GroupName(alpha.Id) == "Альфа", "plain name of a nested group");
+
+            Check(data.DepthOf(work.Id) == 1 && data.DepthOf(projects.Id) == 2 && data.DepthOf(alpha.Id) == 3 && data.DepthOf("nope") == 0, "depth");
+            Check(Names(data.ChildrenOf(null)) == "Работа, Личное", "top-level groups: " + Names(data.ChildrenOf(null)));
+            Check(Names(data.ChildrenOf("")) == "Работа, Личное", "an empty id also means the top level");
+            Check(Names(data.ChildrenOf(work.Id)) == "Проекты, Серверы", "children of a group: " + Names(data.ChildrenOf(work.Id)));
+            Check(data.ChildrenOf(alpha.Id).Count == 0, "a leaf has no children");
+            Check(data.DescendantsOf(work.Id).Count == 3 && data.DescendantsOf(home.Id).Count == 0 && data.DescendantsOf(null).Count == 0, "descendants");
+            Check(Names(data.TreeOrder(ByName)) == "Личное, Работа, Проекты, Альфа, Серверы", "tree order: " + Names(data.TreeOrder(ByName)));
+
+            // Одинаковые названия допустимы в разных группах, но не среди соседних.
+            Group homeProjects = data.AddGroup("проекты", home.Id);
+            Check(homeProjects.ParentId == home.Id, "the same name under another parent");
+            data.AddGroup("Работа", work.Id);
+            ExpectValidation(delegate { data.AddGroup("ПРОЕКТЫ", work.Id); });
+            ExpectValidation(delegate { data.AddGroup("личное"); });
+            ExpectValidation(delegate { data.AddGroup("Новая", "no-such-group"); });
+            ExpectValidation(delegate { data.AddGroup("", work.Id); });
+            Check(data.ValidateGroupName("Проекты", work.Id, null).Contains("Работа"), "the error names the parent group");
+            Check(data.ValidateGroupName("Проекты", work.Id, projects.Id) == null, "a group does not clash with itself");
+            Check(data.ValidateGroupName("Проекты", null, null) == null, "the name is free on the top level");
+            Check(data.Groups.Count == 7, "only valid groups are added: " + data.Groups.Count);
+
+            // Счётчики — только свои записи, без подгрупп.
+            data.AddEntry(work.Id, "w", "1", "в самой группе");
+            data.AddEntry(alpha.Id, "a", "2", "глубоко");
+            data.AddEntry(alpha.Id, "b", "3", "глубоко 2");
+            int ungrouped;
+            Dictionary<string, int> counts = data.CountByGroup(out ungrouped);
+            Check(counts[work.Id] == 1 && counts[projects.Id] == 0 && counts[alpha.Id] == 2 && ungrouped == 0, "direct counts");
+            Check(data.CountInBranch(work.Id) == 3 && data.CountInBranch(projects.Id) == 2 && data.CountInBranch(home.Id) == 0, "branch counts");
+        }
+
+        private static void NestedGroupsMove()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            Group projects = data.AddGroup("Проекты", work.Id);
+            Group alpha = data.AddGroup("Альфа", projects.Id);
+            Group home = data.AddGroup("Личное");
+            Entry entry = data.AddEntry(alpha.Id, "a", "1", "запись");
+
+            // Ветка переносится целиком: подгруппы и записи едут вместе с группой.
+            Check(data.MoveGroup(projects.Id, home.Id), "a move reports a change");
+            Check(projects.ParentId == home.Id && alpha.ParentId == projects.Id && entry.GroupId == alpha.Id, "the branch moves as a whole");
+            Check(data.GroupPath(alpha.Id) == "Личное / Проекты / Альфа", "path after the move");
+            Check(!data.MoveGroup(projects.Id, home.Id), "moving to the same place changes nothing");
+
+            Check(data.MoveGroup(projects.Id, null), "move to the top level");
+            Check(projects.ParentId == null && data.DepthOf(alpha.Id) == 2, "the group is on the top level");
+            Check(!data.MoveGroup(projects.Id, ""), "an empty id means the top level");
+
+            // Запрещённые переносы.
+            ExpectValidation(delegate { data.MoveGroup(projects.Id, projects.Id); });
+            ExpectValidation(delegate { data.MoveGroup(projects.Id, alpha.Id); });
+            ExpectValidation(delegate { data.MoveGroup(projects.Id, "no-such-group"); });
+            ExpectValidation(delegate { data.MoveGroup("no-such-group", work.Id); });
+            Check(projects.ParentId == null, "a rejected move changes nothing");
+            Check(data.ValidateGroupParent(projects.Id, alpha.Id) != null && data.ValidateGroupParent(projects.Id, work.Id) == null, "placement check");
+
+            // Совпадение названий в новом месте.
+            Group clash = data.AddGroup("Проекты", work.Id);
+            ExpectValidation(delegate { data.MoveGroup(projects.Id, work.Id); });
+            Check(data.ValidateGroupParent(projects.Id, work.Id) == null, "the place itself is fine, only the name clashes");
+
+            // Переименование и перенос одной операцией.
+            Check(data.UpdateGroup(projects.Id, "Старые проекты", work.Id), "rename and move together");
+            Check(projects.Name == "Старые проекты" && projects.ParentId == work.Id, "both changes are applied");
+            Check(!data.UpdateGroup(projects.Id, " Старые проекты ", work.Id), "the same values change nothing");
+            ExpectValidation(delegate { data.UpdateGroup(projects.Id, "проекты", work.Id); });
+            ExpectValidation(delegate { data.UpdateGroup(projects.Id, "", work.Id); });
+            Check(projects.Name == "Старые проекты" && projects.ParentId == work.Id, "a rejected update changes nothing");
+
+            // Переименование не трогает место в дереве.
+            data.RenameGroup(alpha.Id, "Бета");
+            Check(alpha.Name == "Бета" && alpha.ParentId == projects.Id, "rename keeps the parent");
+            Check(clash.ParentId == work.Id && clash.Name == "Проекты", "other groups are untouched");
+        }
+
+        private static void NestedGroupsDepthLimit()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group top = data.AddGroup("Уровень 1");
+            Group current = top;
+            for (int level = 2; level <= VaultData.MaxGroupDepth; level++)
+            {
+                current = data.AddGroup("Уровень " + level, current.Id);
+            }
+            string deepest = current.Id;
+            string almostDeepest = current.ParentId;
+            Check(data.DepthOf(deepest) == VaultData.MaxGroupDepth, "the deepest allowed level");
+            ExpectValidation(delegate { data.AddGroup("Слишком глубоко", deepest); });
+            Check(data.ValidateGroupParent(null, deepest).Contains(VaultData.MaxGroupDepth.ToString()), "the error names the limit");
+
+            // При переносе считается вся ветка, а не только сама группа.
+            Group branch = data.AddGroup("Ветка");
+            Group leaf = data.AddGroup("Лист", branch.Id);
+            ExpectValidation(delegate { data.MoveGroup(branch.Id, almostDeepest); });
+            Check(branch.ParentId == null, "a branch that would be too deep stays where it was");
+
+            Check(data.MoveGroup(leaf.Id, almostDeepest), "a single group still fits there");
+            Check(data.DepthOf(leaf.Id) == VaultData.MaxGroupDepth, "it sits on the last level");
+            Check(data.MoveGroup(branch.Id, data.ChildrenOf(top.Id)[0].Id), "the branch fits higher up");
+            Check(data.DepthOf(branch.Id) == 3, "depth of the moved branch");
+        }
+
+        private static void NestedGroupsDelete()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            Group projects = data.AddGroup("Проекты", work.Id);
+            Group alpha = data.AddGroup("Альфа", projects.Id);
+            Group beta = data.AddGroup("Бета", projects.Id);
+            Group servers = data.AddGroup("Серверы", work.Id);
+            Group home = data.AddGroup("Личное");
+            Entry inWork = data.AddEntry(work.Id, "w", "1", "W");
+            Entry inProjects = data.AddEntry(projects.Id, "p", "2", "P");
+            Entry inAlpha = data.AddEntry(alpha.Id, "a", "3", "A");
+            Entry inBeta = data.AddEntry(beta.Id, "b", "4", "B");
+            Entry inServers = data.AddEntry(servers.Id, "s", "5", "S");
+            Entry inHome = data.AddEntry(home.Id, "h", "6", "H");
+
+            // Группа из середины дерева: её подгруппы исчезают, записи поднимаются к родителю.
+            Check(data.DeleteGroup(projects.Id) == 3, "three entries move up");
+            Check(data.FindGroup(projects.Id) == null && data.FindGroup(alpha.Id) == null && data.FindGroup(beta.Id) == null, "the branch is gone");
+            Check(data.Groups.Count == 3, "other groups stay");
+            Check(inProjects.GroupId == work.Id && inAlpha.GroupId == work.Id && inBeta.GroupId == work.Id, "entries land in the parent group");
+            Check(inWork.GroupId == work.Id && inServers.GroupId == servers.Id && inHome.GroupId == home.Id, "other entries are untouched");
+            Check(data.Entries.Count == 6, "no entry is deleted");
+
+            // Группа верхнего уровня: записи всей ветки остаются без группы.
+            Check(data.DeleteGroup(work.Id) == 5, "entries of the whole branch are released");
+            Check(data.Groups.Count == 1 && data.Groups[0] == home, "only the unrelated group is left");
+            Check(inWork.GroupId == null && inServers.GroupId == null && inAlpha.GroupId == null, "entries become ungrouped");
+            Check(inHome.GroupId == home.Id && data.Entries.Count == 6, "the rest is intact");
+            ExpectValidation(delegate { data.DeleteGroup(projects.Id); });
+        }
+
+        private static void NestedGroupsQuery()
+        {
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            Group projects = data.AddGroup("Проекты", work.Id);
+            Group home = data.AddGroup("Личное");
+            data.AddEntry(work.Id, "boss", "1", "Почта начальника");
+            data.AddEntry(projects.Id, "dev", "2", "Сервер сборки");
+            data.AddEntry(projects.Id, "qa", "3", "Стенд");
+            data.AddEntry(home.Id, "me", "4", "Почта");
+
+            // Группа показывает только свои записи; подгруппы — отдельно.
+            Check(data.Query(GroupFilter.ForGroup(work.Id), "").Count == 1, "a parent group lists its own entries only");
+            Check(data.Query(GroupFilter.ForGroup(projects.Id), "").Count == 2, "a subgroup lists its entries");
+
+            // Поиск идёт по пути к группе: по названию родителя находятся и записи подгрупп.
+            Check(data.Query(GroupFilter.All, "работа").Count == 3, "search by the parent name finds entries of subgroups");
+            Check(data.Query(GroupFilter.All, "проекты").Count == 2, "search by the subgroup name");
+            Check(data.Query(GroupFilter.All, "работа стенд").Count == 1, "group name and description together");
+            Check(data.Query(GroupFilter.All, "личное сервер").Count == 0, "words from different entries do not combine");
+
+            Dictionary<string, string> paths = data.GroupPaths();
+            Check(paths.Count == 3 && paths[projects.Id] == "Работа / Проекты" && paths[home.Id] == "Личное", "paths of all groups");
+        }
+
+        private static void NestedGroupsJson()
+        {
+            // Без вложенности файл остаётся версии 1 и не содержит новых полей.
+            VaultData data = VaultData.CreateEmpty();
+            Group work = data.AddGroup("Работа");
+            data.AddEntry(work.Id, "l", "p", "d");
+            string flatJson = Encoding.UTF8.GetString(data.ToJson());
+            Check(flatJson.Contains("\"version\":1") && !flatJson.Contains("parentId"), "flat data is written as version 1: " + flatJson);
+
+            // С вложенностью — версия 2, поле parentId только у вложенных групп.
+            Group projects = data.AddGroup("Проекты", work.Id);
+            Group alpha = data.AddGroup("Альфа", projects.Id);
+            string nestedJson = Encoding.UTF8.GetString(data.ToJson());
+            Check(nestedJson.Contains("\"version\":2"), "nested data is written as version 2");
+            Check(CountOf(nestedJson, "\"parentId\"") == 2, "parentId is written for nested groups only: " + nestedJson);
+
+            VaultData copy = FromJsonText(nestedJson);
+            Check(copy.Version == 2 && copy.Groups.Count == 3, "nested data is read back");
+            Check(copy.FindGroup(alpha.Id).ParentId == projects.Id && copy.FindGroup(work.Id).ParentId == null, "links survive");
+            Check(copy.GroupPath(alpha.Id) == "Работа / Проекты / Альфа", "path after reading");
+
+            // Когда вложенность убрали, файл снова версии 1.
+            copy.MoveGroup(projects.Id, null);
+            copy.MoveGroup(alpha.Id, null);
+            Check(Encoding.UTF8.GetString(copy.ToJson()).Contains("\"version\":1"), "the version drops back to 1");
+
+            // Файл версии 1 (без parentId) читается как раньше.
+            VaultData old = FromJsonText("{\"version\":1,\"groups\":[{\"id\":\"g1\",\"name\":\"A\"}],\"entries\":[{\"id\":\"e1\",\"groupId\":\"g1\",\"login\":\"l\"}]}");
+            Check(old.Groups[0].ParentId == null && old.Entries[0].GroupId == "g1" && old.Version == 1, "a version 1 file");
+
+            // Испорченные ссылки: несуществующий родитель, ссылка на себя, кольца из двух и трёх групп.
+            VaultData broken = FromJsonText(
+                "{\"version\":2,\"groups\":[" +
+                "{\"id\":\"a\",\"name\":\"A\",\"parentId\":\"gone\"}," +
+                "{\"id\":\"b\",\"name\":\"B\",\"parentId\":\"b\"}," +
+                "{\"id\":\"c\",\"name\":\"C\",\"parentId\":\"d\"}," +
+                "{\"id\":\"d\",\"name\":\"D\",\"parentId\":\"c\"}," +
+                "{\"id\":\"e\",\"name\":\"E\",\"parentId\":\"g\"}," +
+                "{\"id\":\"f\",\"name\":\"F\",\"parentId\":\"e\"}," +
+                "{\"id\":\"g\",\"name\":\"G\",\"parentId\":\"f\"}," +
+                "{\"id\":\"h\",\"name\":\"H\",\"parentId\":\"a\"}," +
+                "{\"id\":\"i\",\"name\":\"I\",\"parentId\":\"\"}]," +
+                "\"entries\":[{\"id\":\"e1\",\"groupId\":\"d\",\"login\":\"l\"}]}");
+            Check(broken.FindGroup("a").ParentId == null, "a missing parent is dropped");
+            Check(broken.FindGroup("b").ParentId == null, "a self reference is dropped");
+            Check(broken.FindGroup("i").ParentId == null, "an empty parent id means the top level");
+            Check(broken.FindGroup("h").ParentId == "a", "a valid link is kept");
+            Check(broken.TreeOrder(ByName).Count == broken.Groups.Count,
+                "after the rings are broken every group is reachable in the tree: " + Names(broken.TreeOrder(ByName)));
+            foreach (Group group in broken.Groups)
+            {
+                Check(broken.DepthOf(group.Id) >= 1 && broken.DepthOf(group.Id) <= broken.Groups.Count, "depth is finite for " + group.Name);
+                Check(broken.GroupPath(group.Id) != null, "a path exists for " + group.Name);
+            }
+            Check(broken.Entries[0].GroupId == "d", "entries keep their group");
+
+            VaultData again = VaultData.FromJson(broken.ToJson());
+            Check(again.Groups.Count == broken.Groups.Count && again.TreeOrder(ByName).Count == again.Groups.Count, "repaired data round-trips");
+        }
+
         // ---------- JSON ----------
 
         private static void JsonSpecialCharacters()
@@ -751,7 +1020,7 @@ namespace KeyBox.Tests
             byte[] json = data.ToJson();
             VaultData copy = VaultData.FromJson(json);
 
-            Check(copy.Version == VaultData.CurrentVersion, "version");
+            Check(copy.Version == 1, "data without nested groups keeps structure version 1");
             Check(copy.Groups.Count == 1 && copy.Groups[0].Name == group.Name && copy.Groups[0].Id == group.Id, "group survives");
             Check(copy.Entries.Count == samples.Length, "entry count");
             for (int i = 0; i < samples.Length; i++)
@@ -792,7 +1061,7 @@ namespace KeyBox.Tests
             Check(messy.Entries[1].GroupId == null, "dangling group reference is cleared");
             Check(messy.Entries[0].Id != messy.Entries[1].Id && !string.IsNullOrEmpty(messy.Entries[2].Id), "entry ids are made unique");
 
-            ExpectVaultError(VaultError.UnsupportedVersion, delegate { FromJsonText("{\"version\":2,\"groups\":[],\"entries\":[]}"); });
+            ExpectVaultError(VaultError.UnsupportedVersion, delegate { FromJsonText("{\"version\":3,\"groups\":[],\"entries\":[]}"); });
             // Не JSON или оборванный JSON — всегда ошибка формата.
             string[] broken =
             {
@@ -958,10 +1227,13 @@ namespace KeyBox.Tests
             {
                 using (VaultSession session = VaultSession.Open(nodeFile, InteropPassword))
                 {
-                    Check(session.Data.Groups.Count == 1 && session.Data.Groups[0].Name == "Работа", "node file: group");
-                    Check(session.Data.Entries.Count == 1, "node file: entry count");
-                    Entry entry = session.Data.Entries[0];
-                    Check(entry.GroupId == session.Data.Groups[0].Id, "node file: group reference");
+                    VaultData data = session.Data;
+                    Check(data.Groups.Count == 2 && data.Groups[0].Name == "Работа" && data.Groups[1].Name == "Проекты", "node file: groups");
+                    Check(data.Groups[0].ParentId == null && data.Groups[1].ParentId == data.Groups[0].Id, "node file: nested group");
+                    Check(data.Entries.Count == 1, "node file: entry count");
+                    Entry entry = data.Entries[0];
+                    Check(entry.GroupId == data.Groups[1].Id, "node file: group reference");
+                    Check(data.GroupPath(entry.GroupId) == "Работа / Проекты", "node file: group path");
                     Check(entry.Login == "user@example.com", "node file: login");
                     Check(entry.Password == InteropSecret, "node file: password");
                     Check(entry.Description == "Строка 1\nСтрока 2", "node file: description");
@@ -980,8 +1252,14 @@ namespace KeyBox.Tests
             using (VaultSession session = VaultSession.Create(csFile, InteropPassword, 5000))
             {
                 Group group = session.Data.AddGroup("Работа");
-                session.Data.AddEntry(group.Id, "user@example.com", InteropSecret, "Строка 1\r\nСтрока 2");
+                Group nested = session.Data.AddGroup("Проекты", group.Id);
+                session.Data.AddEntry(nested.Id, "user@example.com", InteropSecret, "Строка 1\r\nСтрока 2");
                 session.Save();
+            }
+            using (VaultSession reopened = VaultSession.Open(csFile, InteropPassword))
+            {
+                Check(reopened.Data.Version == 2 && reopened.Data.Groups.Count == 2, "a nested vault survives encryption and reopening");
+                Check(reopened.Data.GroupPath(reopened.Data.Entries[0].GroupId) == "Работа / Проекты", "group path after reopening");
             }
         }
 

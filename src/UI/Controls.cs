@@ -135,20 +135,38 @@ namespace KeyBox.UI
         }
     }
 
-    /// <summary>Список групп слева: значок, название, число записей, подсветка при перетаскивании.</summary>
-    internal sealed class GroupListBox : ListBox
+    /// <summary>
+    /// Дерево групп слева: значок, название, число записей, подсветка при перетаскивании.
+    /// Группы можно вкладывать друг в друга; ветка сворачивается стрелкой, двойным щелчком
+    /// и клавишами «влево» и «вправо». Строки рисует программа, а всё поведение дерева
+    /// (выбор, клавиатура, раскрытие, доступность для экранных дикторов) — стандартное.
+    /// </summary>
+    internal sealed class GroupTree : TreeView
     {
+        private const int TVS_NOHSCROLL = 0x8000;
+        private const int TVM_SETEXTENDEDSTYLE = 0x112C;
+        private const int TVS_EX_DOUBLEBUFFER = 0x0004;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_LBUTTONDBLCLK = 0x0203;
+
         private readonly Bitmap iconAll;
         private readonly Bitmap iconGroup;
         private readonly Bitmap iconNone;
-        private int dropIndex = -1;
+        private readonly Bitmap arrowClosed;
+        private readonly Bitmap arrowOpen;
+        private TreeNode dropNode;
 
-        public GroupListBox()
+        public GroupTree()
         {
-            DrawMode = DrawMode.OwnerDrawFixed;
-            IntegralHeight = false;
+            DrawMode = TreeViewDrawMode.OwnerDrawAll;
+            ShowLines = false;
+            ShowPlusMinus = false;
+            ShowRootLines = false;
+            FullRowSelect = true;
+            HideSelection = false;
             BorderStyle = BorderStyle.None;
-            ItemHeight = Math.Min(255, Ui.S(30));
+            ItemHeight = Ui.S(30);
+            Indent = LevelIndent;
             BackColor = Ui.PaneBack;
             ForeColor = Ui.TextColor;
             Font = Ui.Font;
@@ -156,39 +174,101 @@ namespace KeyBox.UI
             iconAll = Ui.Glyph(Ui.GlyphList, 16, Ui.GlyphColor);
             iconGroup = Ui.Glyph(Ui.GlyphFolder, 16, Ui.GlyphColor);
             iconNone = Ui.Glyph(Ui.GlyphPage, 16, Ui.Muted);
+            arrowClosed = Ui.Glyph(Ui.GlyphChevronRight, 10, Ui.Muted);
+            arrowOpen = Ui.Glyph(Ui.GlyphChevronDown, 10, Ui.Muted);
         }
 
-        /// <summary>Строка, над которой сейчас находятся перетаскиваемые записи; -1 — нет такой.</summary>
-        public int DropIndex
+        /// <summary>Сдвиг вправо на каждый уровень вложенности.</summary>
+        private static int LevelIndent
         {
-            get { return dropIndex; }
+            get { return Ui.S(16); }
+        }
+
+        /// <summary>Ширина области стрелки, которая сворачивает и раскрывает ветку.</summary>
+        private static int ArrowWidth
+        {
+            get { return Ui.S(18); }
+        }
+
+        /// <summary>
+        /// Строка, которая сейчас подсвечена как место, куда упадёт перетаскиваемое;
+        /// null — подсветки нет.
+        /// </summary>
+        public TreeNode DropNode
+        {
+            get { return dropNode; }
             set
             {
-                if (dropIndex == value) return;
-                int old = dropIndex;
-                dropIndex = value;
-                InvalidateItem(old);
-                InvalidateItem(value);
+                if (dropNode == value) return;
+                TreeNode old = dropNode;
+                dropNode = value;
+                InvalidateRow(old);
+                InvalidateRow(value);
             }
         }
 
-        private void InvalidateItem(int index)
+        /// <summary>Область стрелки у строки (есть только у групп с подгруппами).</summary>
+        public Rectangle ArrowBounds(TreeNode node)
         {
-            if (index >= 0 && index < Items.Count && IsHandleCreated)
+            Rectangle label = node.Bounds;
+            return new Rectangle(Ui.S(6) + node.Level * LevelIndent, label.Y, ArrowWidth, label.Height);
+        }
+
+        private void InvalidateRow(TreeNode node)
+        {
+            if (node == null || !IsHandleCreated || node.TreeView != this) return;
+            Rectangle label = node.Bounds;
+            if (label.Height > 0) Invalidate(new Rectangle(0, label.Y, ClientSize.Width, label.Height));
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
             {
-                Invalidate(GetItemRectangle(index));
+                // Длинные названия обрезаются многоточием, горизонтальная прокрутка не нужна.
+                CreateParams parameters = base.CreateParams;
+                parameters.Style |= TVS_NOHSCROLL;
+                return parameters;
             }
         }
 
-        protected override void OnDrawItem(DrawItemEventArgs e)
+        protected override void OnHandleCreated(EventArgs e)
         {
-            if (e.Index < 0 || e.Index >= Items.Count) return;
+            base.OnHandleCreated(e);
+            NativeMethods.SendMessage(Handle, TVM_SETEXTENDEDSTYLE, (IntPtr)TVS_EX_DOUBLEBUFFER, (IntPtr)TVS_EX_DOUBLEBUFFER);
+        }
 
-            var item = (GroupItem)Items[e.Index];
-            bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-            bool drop = e.Index == dropIndex;
-            Rectangle bounds = e.Bounds;
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_LBUTTONDBLCLK)
+            {
+                long packed = m.LParam.ToInt64();
+                var point = new Point((short)(packed & 0xFFFF), (short)((packed >> 16) & 0xFFFF));
+                TreeNode node = GetNodeAt(point);
+                if (node != null && node.Nodes.Count > 0 && ArrowBounds(node).Contains(point))
+                {
+                    // Щелчок по стрелке только сворачивает или раскрывает ветку и не меняет выбранную группу.
+                    // Сворачивается только сама группа: вложенные ветки остаются как были и при
+                    // повторном раскрытии выглядят по-прежнему (Toggle() свернул бы и их).
+                    Focus();
+                    if (node.IsExpanded) node.Collapse(true);
+                    else node.Expand();
+                    return;
+                }
+            }
+            base.WndProc(ref m);
+        }
+
+        protected override void OnDrawNode(DrawTreeNodeEventArgs e)
+        {
+            TreeNode node = e.Node;
+            var item = node == null ? null : node.Tag as GroupItem;
+            if (item == null || e.Bounds.Height <= 0) return;
+
             Graphics g = e.Graphics;
+            var bounds = new Rectangle(0, e.Bounds.Y, ClientSize.Width, e.Bounds.Height);
+            bool selected = node.IsSelected;
+            bool drop = node == dropNode;
 
             Color back = drop ? Ui.DropBack : (selected ? Ui.SelectedBack : BackColor);
             using (var brush = new SolidBrush(back))
@@ -213,12 +293,28 @@ namespace KeyBox.UI
             Color textColor = (selected || drop) ? Ui.SelectedText : (item.Kind == FilterKind.Ungrouped ? Ui.Muted : ForeColor);
             Color countColor = (selected || drop) ? Ui.SelectedText : Ui.Muted;
 
-            int x = bounds.X + Ui.S(14);
+            // Стрелка ветки, затем значок, название и справа — число записей.
+            Rectangle arrowArea = ArrowBounds(node);
+            if (node.Nodes.Count > 0)
+            {
+                Bitmap arrow = node.IsExpanded ? arrowOpen : arrowClosed;
+                if (arrow != null)
+                {
+                    g.DrawImage(arrow, arrowArea.X + (arrowArea.Width - arrow.Width) / 2,
+                        bounds.Y + (bounds.Height - arrow.Height) / 2, arrow.Width, arrow.Height);
+                }
+                else
+                {
+                    DrawPlainArrow(g, arrowArea, node.IsExpanded);
+                }
+            }
+
+            int x = arrowArea.Right;
             Bitmap icon = item.Kind == FilterKind.All ? iconAll : (item.Kind == FilterKind.Group ? iconGroup : iconNone);
             if (icon != null)
             {
                 g.DrawImage(icon, x, bounds.Y + (bounds.Height - icon.Height) / 2, icon.Width, icon.Height);
-                x += icon.Width + Ui.S(9);
+                x += icon.Width + Ui.S(8);
             }
 
             const TextFormatFlags flags = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
@@ -232,13 +328,36 @@ namespace KeyBox.UI
             TextRenderer.DrawText(g, item.Name, Font, textBounds, textColor, flags | TextFormatFlags.EndEllipsis);
         }
 
+        /// <summary>
+        /// Стрелка ветки простым треугольником — для систем, где нет шрифта со значками
+        /// (старые версии Windows, серверы без оформления): без неё ветку было бы нечем свернуть мышью.
+        /// </summary>
+        private static void DrawPlainArrow(Graphics g, Rectangle area, bool open)
+        {
+            int half = Ui.S(4);
+            int x = area.X + area.Width / 2;
+            int y = area.Y + area.Height / 2;
+            Point[] points = open
+                ? new[] { new Point(x - half, y - half / 2), new Point(x + half, y - half / 2), new Point(x, y + half / 2 + 1) }
+                : new[] { new Point(x - half / 2, y - half), new Point(x + half / 2 + 1, y), new Point(x - half / 2, y + half) };
+
+            System.Drawing.Drawing2D.SmoothingMode previous = g.SmoothingMode;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var brush = new SolidBrush(Ui.Muted))
+            {
+                g.FillPolygon(brush, points);
+            }
+            g.SmoothingMode = previous;
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                if (iconAll != null) iconAll.Dispose();
-                if (iconGroup != null) iconGroup.Dispose();
-                if (iconNone != null) iconNone.Dispose();
+                foreach (Bitmap bitmap in new[] { iconAll, iconGroup, iconNone, arrowClosed, arrowOpen })
+                {
+                    if (bitmap != null) bitmap.Dispose();
+                }
             }
             base.Dispose(disposing);
         }

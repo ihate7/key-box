@@ -17,6 +17,8 @@ const SECRET = 'p@ss "quoted" \\ \u0441\u043b\u043e\u0432\u043e \ud83d\udd11 <ta
 const GROUP = '\u0420\u0430\u0431\u043e\u0442\u0430';                                   // «Работа»
 const DESCRIPTION = '\u0421\u0442\u0440\u043e\u043a\u0430 1\n\u0421\u0442\u0440\u043e\u043a\u0430 2'; // «Строка 1\nСтрока 2»
 
+const SUBGROUP = 'Проекты';   // вложена в группу «Работа»
+
 const HEADER_SIZE = 58;
 const TAG_SIZE = 16;
 
@@ -72,11 +74,11 @@ const [mode, file] = process.argv.slice(2);
 
 if (mode === 'write') {
   writeVault(file, PASSWORD, {
-    version: 1,
-    groups: [{ id: 'g1', name: GROUP }],
+    version: 2,
+    groups: [{ id: 'g1', name: GROUP }, { id: 'g2', name: SUBGROUP, parentId: 'g1' }],
     entries: [{
       id: 'e1',
-      groupId: 'g1',
+      groupId: 'g2',
       login: 'user@example.com',
       password: SECRET,
       description: DESCRIPTION,
@@ -87,11 +89,15 @@ if (mode === 'write') {
   console.log('ok    node: wrote ' + file);
 } else if (mode === 'verify') {
   const vault = openVault(file, PASSWORD);
-  check(vault.version === 1, 'version');
-  check(vault.groups.length === 1 && vault.groups[0].name === GROUP, 'group');
+  check(vault.version === 2, 'version 2: the vault uses nested groups');
+  check(vault.groups.length === 2, 'group count');
+  const parent = vault.groups.find((g) => g.name === GROUP);
+  const child = vault.groups.find((g) => g.name === SUBGROUP);
+  check(parent && !('parentId' in parent), 'top-level group has no parentId');
+  check(child && child.parentId === parent.id, 'nested group points to its parent');
   check(vault.entries.length === 1, 'entry count');
   const entry = vault.entries[0];
-  check(entry.groupId === vault.groups[0].id, 'group reference');
+  check(entry.groupId === child.id, 'group reference');
   check(entry.login === 'user@example.com', 'login');
   check(entry.password === SECRET, 'password');
   check(entry.description === DESCRIPTION, 'description');

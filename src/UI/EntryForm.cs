@@ -198,8 +198,8 @@ namespace KeyBox.UI
 
         private void FillGroups(VaultData data, string selectedId)
         {
-            var groups = new List<Group>(data.Groups);
-            groups.Sort(delegate(Group a, Group b) { return Ui.CompareNatural(a.Name, b.Name); });
+            // Группы идут в порядке дерева и показаны полным путём: «Работа / Проекты».
+            List<Group> groups = data.TreeOrder(Ui.CompareNatural);
 
             var none = new GroupChoice();
             none.Id = null;
@@ -211,7 +211,7 @@ namespace KeyBox.UI
             {
                 var choice = new GroupChoice();
                 choice.Id = group.Id;
-                choice.Name = group.Name;
+                choice.Name = data.GroupPath(group.Id);
                 cmbGroup.Items.Add(choice);
                 if (group.Id == selectedId)
                 {

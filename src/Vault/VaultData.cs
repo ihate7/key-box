@@ -13,7 +13,7 @@ namespace KeyBox.Vault
         public ValidationException(string message) : base(message) { }
     }
 
-    /// <summary>Группа паролей.</summary>
+    /// <summary>Группа паролей. Группы можно вкладывать друг в друга.</summary>
     [DataContract]
     internal sealed class Group
     {
@@ -22,6 +22,13 @@ namespace KeyBox.Vault
 
         [DataMember(Name = "name", Order = 1)]
         public string Name { get; set; }
+
+        /// <summary>
+        /// Идентификатор группы, в которую вложена эта; null — группа верхнего уровня.
+        /// У групп верхнего уровня поле в файл не пишется.
+        /// </summary>
+        [DataMember(Name = "parentId", Order = 2, EmitDefaultValue = false)]
+        public string ParentId { get; set; }
     }
 
     /// <summary>Запись: логин, пароль, описание и группа, в которой она лежит.</summary>
@@ -120,8 +127,22 @@ namespace KeyBox.Vault
     [DataContract]
     internal sealed class VaultData
     {
-        public const int CurrentVersion = 1;
+        /// <summary>
+        /// Версия структуры данных. 1 — группы одним списком, 2 — группы могут быть вложенными.
+        /// Файл помечается версией 2, только если вложенность действительно используется:
+        /// так хранилище без вложенных групп по-прежнему открывается программой версии 1.0,
+        /// а с вложенными она честно откажется открывать, вместо того чтобы потерять структуру.
+        /// </summary>
+        public const int CurrentVersion = 2;
+
         public const int MaxGroupNameLength = 100;
+
+        /// <summary>Наибольшая глубина вложенности групп (1 — только верхний уровень).</summary>
+        public const int MaxGroupDepth = 8;
+
+        /// <summary>Разделитель в пути к группе: «Работа / Проекты».</summary>
+        public const string PathSeparator = " / ";
+
         public const int MaxLoginLength = 1000;
         public const int MaxPasswordLength = 1000;
         public const int MaxDescriptionLength = 10000;
@@ -140,9 +161,9 @@ namespace KeyBox.Vault
         public static VaultData CreateEmpty()
         {
             var data = new VaultData();
-            data.Version = CurrentVersion;
             data.Groups = new List<Group>();
             data.Entries = new List<Entry>();
+            data.Version = data.RequiredVersion();
             return data;
         }
 
@@ -165,8 +186,107 @@ namespace KeyBox.Vault
             return group == null ? null : group.Name;
         }
 
-        /// <summary>Проверяет название группы. Возвращает текст ошибки или null, если всё в порядке.</summary>
-        public string ValidateGroupName(string name, string exceptGroupId)
+        /// <summary>Путь к группе от верхнего уровня: «Работа / Проекты». null, если группы нет.</summary>
+        public string GroupPath(string id)
+        {
+            var names = new List<string>();
+            Group group = FindGroup(id);
+            for (int guard = 0; group != null && guard <= Groups.Count; guard++)
+            {
+                names.Insert(0, group.Name);
+                group = FindGroup(group.ParentId);
+            }
+            return names.Count == 0 ? null : string.Join(PathSeparator, names.ToArray());
+        }
+
+        /// <summary>Группы, вложенные непосредственно в указанную (null — группы верхнего уровня).</summary>
+        public List<Group> ChildrenOf(string parentId)
+        {
+            string parent = NormalizeId(parentId);
+            var result = new List<Group>();
+            foreach (Group group in Groups)
+            {
+                if (group.ParentId == parent) result.Add(group);
+            }
+            return result;
+        }
+
+        /// <summary>Все группы, вложенные в указанную на любой глубине.</summary>
+        public List<Group> DescendantsOf(string id)
+        {
+            var result = new List<Group>();
+            if (!string.IsNullOrEmpty(id)) CollectDescendants(id, result, 0);
+            return result;
+        }
+
+        private void CollectDescendants(string parentId, List<Group> result, int depth)
+        {
+            if (depth > Groups.Count) return; // защита от зацикленных данных
+            foreach (Group group in Groups)
+            {
+                if (group.ParentId == parentId)
+                {
+                    result.Add(group);
+                    CollectDescendants(group.Id, result, depth + 1);
+                }
+            }
+        }
+
+        /// <summary>Уровень вложенности группы: 1 — верхний уровень. 0, если группы нет.</summary>
+        public int DepthOf(string id)
+        {
+            int depth = 0;
+            Group group = FindGroup(id);
+            while (group != null && depth <= Groups.Count)
+            {
+                depth++;
+                group = FindGroup(group.ParentId);
+            }
+            return depth;
+        }
+
+        /// <summary>Число уровней в ветке, начиная с самой группы: 1 — подгрупп нет.</summary>
+        private int HeightOf(string id, int guard)
+        {
+            int tallest = 0;
+            if (guard <= Groups.Count)
+            {
+                foreach (Group child in ChildrenOf(id))
+                {
+                    tallest = Math.Max(tallest, HeightOf(child.Id, guard + 1));
+                }
+            }
+            return tallest + 1;
+        }
+
+        /// <summary>
+        /// Все группы в порядке обхода дерева: группа, сразу за ней её подгруппы.
+        /// Соседние группы упорядочиваются по названию функцией compareNames.
+        /// </summary>
+        public List<Group> TreeOrder(Comparison<string> compareNames)
+        {
+            var result = new List<Group>();
+            AppendBranch(null, compareNames, result, 0);
+            return result;
+        }
+
+        private void AppendBranch(string parentId, Comparison<string> compareNames, List<Group> result, int depth)
+        {
+            if (depth > Groups.Count) return;
+            List<Group> children = ChildrenOf(parentId);
+            children.Sort(delegate(Group a, Group b) { return compareNames(a.Name, b.Name); });
+            foreach (Group child in children)
+            {
+                result.Add(child);
+                AppendBranch(child.Id, compareNames, result, depth + 1);
+            }
+        }
+
+        /// <summary>
+        /// Проверяет название группы: оно не должно повторяться среди соседних групп
+        /// (в той же родительской). Возвращает текст ошибки или null, если всё в порядке.
+        /// </summary>
+        public string ValidateGroupName(string name, string parentId, string exceptGroupId)
         {
             string trimmed = (name ?? "").Trim();
             if (trimmed.Length == 0)
@@ -177,53 +297,136 @@ namespace KeyBox.Vault
             {
                 return string.Format("Название группы не должно быть длиннее {0} символов.", MaxGroupNameLength);
             }
+
+            string parent = NormalizeId(parentId);
             foreach (Group group in Groups)
             {
-                if (group.Id != exceptGroupId && string.Equals(group.Name, trimmed, StringComparison.OrdinalIgnoreCase))
+                if (group.Id != exceptGroupId && group.ParentId == parent &&
+                    string.Equals(group.Name, trimmed, StringComparison.OrdinalIgnoreCase))
                 {
-                    return string.Format("Группа «{0}» уже существует.", group.Name);
+                    Group owner = FindGroup(parent);
+                    return owner == null
+                        ? string.Format("Группа «{0}» уже существует.", group.Name)
+                        : string.Format("В группе «{0}» уже есть подгруппа «{1}».", owner.Name, group.Name);
                 }
             }
             return null;
         }
 
+        /// <summary>
+        /// Проверяет, можно ли поместить группу в указанную родительскую (null — на верхний уровень).
+        /// groupId — перемещаемая группа или null для новой. Возвращает текст ошибки или null.
+        /// </summary>
+        public string ValidateGroupParent(string groupId, string parentId)
+        {
+            string parent = NormalizeId(parentId);
+            if (parent == null) return null;
+            if (FindGroup(parent) == null) return "Группа не найдена.";
+
+            int levels = 1;
+            if (!string.IsNullOrEmpty(groupId))
+            {
+                if (parent == groupId) return "Группу нельзя вложить в саму себя.";
+                foreach (Group descendant in DescendantsOf(groupId))
+                {
+                    if (descendant.Id == parent) return "Группу нельзя вложить в её собственную подгруппу.";
+                }
+                levels = HeightOf(groupId, 0);
+            }
+            if (DepthOf(parent) + levels > MaxGroupDepth)
+            {
+                return string.Format("Слишком глубокая вложенность: допускается не больше {0} уровней.", MaxGroupDepth);
+            }
+            return null;
+        }
+
+        /// <summary>Создаёт группу верхнего уровня.</summary>
         public Group AddGroup(string name)
         {
-            string error = ValidateGroupName(name, null);
+            return AddGroup(name, null);
+        }
+
+        /// <summary>Создаёт группу внутри родительской (null — на верхнем уровне).</summary>
+        public Group AddGroup(string name, string parentId)
+        {
+            string error = ValidateGroupParent(null, parentId) ?? ValidateGroupName(name, parentId, null);
             if (error != null) throw new ValidationException(error);
 
             var group = new Group();
             group.Id = NewId();
             group.Name = name.Trim();
+            group.ParentId = NormalizeId(parentId);
             Groups.Add(group);
             return group;
         }
 
-        public void RenameGroup(string id, string name)
+        /// <summary>
+        /// Меняет название группы и её место в дереве. Подгруппы и записи переезжают вместе с ней.
+        /// Возвращает true, если что-нибудь действительно изменилось.
+        /// </summary>
+        public bool UpdateGroup(string id, string name, string parentId)
         {
             Group group = RequireGroup(id);
-            string error = ValidateGroupName(name, id);
+            string parent = NormalizeId(parentId);
+            string error = ValidateGroupParent(id, parent) ?? ValidateGroupName(name, parent, id);
             if (error != null) throw new ValidationException(error);
-            group.Name = name.Trim();
+
+            string newName = name.Trim();
+            bool changed = group.Name != newName || group.ParentId != parent;
+            group.Name = newName;
+            group.ParentId = parent;
+            return changed;
+        }
+
+        public void RenameGroup(string id, string name)
+        {
+            UpdateGroup(id, name, RequireGroup(id).ParentId);
+        }
+
+        /// <summary>Переносит группу в другую родительскую (null — на верхний уровень).</summary>
+        public bool MoveGroup(string id, string parentId)
+        {
+            return UpdateGroup(id, RequireGroup(id).Name, parentId);
+        }
+
+        /// <summary>Число записей в группе и во всех её подгруппах.</summary>
+        public int CountInBranch(string id)
+        {
+            var branch = new HashSet<string>();
+            branch.Add(id);
+            foreach (Group descendant in DescendantsOf(id)) branch.Add(descendant.Id);
+
+            int count = 0;
+            foreach (Entry entry in Entries)
+            {
+                if (entry.GroupId != null && branch.Contains(entry.GroupId)) count++;
+            }
+            return count;
         }
 
         /// <summary>
-        /// Удаляет группу. Записи не удаляются — они остаются без группы.
+        /// Удаляет группу вместе с её подгруппами. Записи не удаляются: все записи из удалённых
+        /// групп переходят на уровень выше — в родительскую группу, а если её нет, остаются без группы.
         /// Возвращает число таких записей.
         /// </summary>
         public int DeleteGroup(string id)
         {
             Group group = RequireGroup(id);
+            var removed = new HashSet<string>();
+            removed.Add(group.Id);
+            foreach (Group descendant in DescendantsOf(group.Id)) removed.Add(descendant.Id);
+
+            string destination = group.ParentId;
             int released = 0;
             foreach (Entry entry in Entries)
             {
-                if (entry.GroupId == id)
+                if (entry.GroupId != null && removed.Contains(entry.GroupId))
                 {
-                    entry.GroupId = null;
+                    entry.GroupId = destination;
                     released++;
                 }
             }
-            Groups.Remove(group);
+            Groups.RemoveAll(delegate(Group candidate) { return removed.Contains(candidate.Id); });
             return released;
         }
 
@@ -356,23 +559,27 @@ namespace KeyBox.Vault
             return moved;
         }
 
+        /// <summary>Пути ко всем группам: идентификатор → «Работа / Проекты».</summary>
+        public Dictionary<string, string> GroupPaths()
+        {
+            var paths = new Dictionary<string, string>();
+            foreach (Group group in Groups)
+            {
+                paths[group.Id] = GroupPath(group.Id);
+            }
+            return paths;
+        }
+
         /// <summary>
-        /// Записи, подходящие под фильтр по группе и строку поиска. Поиск идёт по описанию,
-        /// логину и названию группы; несколько слов должны найтись все. По паролям поиска нет.
+        /// Записи, подходящие под фильтр по группе и строку поиска. Фильтр по группе показывает
+        /// записи, лежащие непосредственно в ней (без подгрупп). Поиск идёт по описанию, логину
+        /// и пути к группе, так что по названию группы находятся и записи её подгрупп;
+        /// несколько слов должны найтись все. По паролям поиска нет.
         /// </summary>
         public List<Entry> Query(GroupFilter filter, string search)
         {
             string[] terms = (search ?? "").Split(Whitespace, StringSplitOptions.RemoveEmptyEntries);
-
-            Dictionary<string, string> groupNames = null;
-            if (terms.Length > 0)
-            {
-                groupNames = new Dictionary<string, string>();
-                foreach (Group group in Groups)
-                {
-                    groupNames[group.Id] = group.Name;
-                }
-            }
+            Dictionary<string, string> groupPaths = terms.Length > 0 ? GroupPaths() : null;
 
             var result = new List<Entry>();
             foreach (Entry entry in Entries)
@@ -380,12 +587,12 @@ namespace KeyBox.Vault
                 if (!filter.Matches(entry)) continue;
                 if (terms.Length > 0)
                 {
-                    string groupName = null;
+                    string groupPath = null;
                     if (!string.IsNullOrEmpty(entry.GroupId))
                     {
-                        groupNames.TryGetValue(entry.GroupId, out groupName);
+                        groupPaths.TryGetValue(entry.GroupId, out groupPath);
                     }
-                    if (!MatchesAll(terms, entry.Description, entry.Login, groupName)) continue;
+                    if (!MatchesAll(terms, entry.Description, entry.Login, groupPath)) continue;
                 }
                 result.Add(entry);
             }
@@ -413,6 +620,7 @@ namespace KeyBox.Vault
 
         public byte[] ToJson()
         {
+            Version = RequiredVersion();
             var serializer = new DataContractJsonSerializer(typeof(VaultData));
             using (var stream = new MemoryStream())
             {
@@ -457,10 +665,19 @@ namespace KeyBox.Vault
             return data;
         }
 
+        /// <summary>Наименьшая версия структуры, которой достаточно для этих данных.</summary>
+        private int RequiredVersion()
+        {
+            foreach (Group group in Groups)
+            {
+                if (group.ParentId != null) return 2;
+            }
+            return 1;
+        }
+
         /// <summary>Приводит прочитанные данные к согласованному виду.</summary>
         private void Normalize()
         {
-            Version = CurrentVersion;
             if (Groups == null) Groups = new List<Group>();
             if (Entries == null) Entries = new List<Entry>();
             Groups.RemoveAll(delegate(Group group) { return group == null; });
@@ -476,6 +693,32 @@ namespace KeyBox.Vault
                 groupIds.Add(group.Id);
                 group.Name = (group.Name ?? "").Trim();
                 if (group.Name.Length == 0) group.Name = "Группа";
+            }
+
+            // Ссылки на родительские группы: несуществующая или на саму себя — группа уходит на верхний уровень.
+            foreach (Group group in Groups)
+            {
+                if (string.IsNullOrEmpty(group.ParentId) || group.ParentId == group.Id || !groupIds.Contains(group.ParentId))
+                {
+                    group.ParentId = null;
+                }
+            }
+
+            // Кольца (А в Б, Б в А) разрываются: иначе такие группы не попали бы в дерево вовсе.
+            foreach (Group group in Groups)
+            {
+                var visited = new HashSet<string>();
+                visited.Add(group.Id);
+                Group ancestor = FindGroup(group.ParentId);
+                while (ancestor != null)
+                {
+                    if (!visited.Add(ancestor.Id))
+                    {
+                        group.ParentId = null;
+                        break;
+                    }
+                    ancestor = FindGroup(ancestor.ParentId);
+                }
             }
 
             var entryIds = new HashSet<string>();
@@ -494,6 +737,8 @@ namespace KeyBox.Vault
                 entry.Password = entry.Password ?? "";
                 entry.Description = entry.Description ?? "";
             }
+
+            Version = RequiredVersion();
         }
 
         // ---------- Вспомогательное ----------
@@ -516,6 +761,12 @@ namespace KeyBox.Vault
         {
             if (string.IsNullOrEmpty(groupId)) return null;
             return RequireGroup(groupId).Id;
+        }
+
+        /// <summary>Пустой идентификатор и null означают одно и то же — «нет группы».</summary>
+        private static string NormalizeId(string id)
+        {
+            return string.IsNullOrEmpty(id) ? null : id;
         }
 
         private static bool IsBlank(string value)

@@ -22,6 +22,11 @@ namespace KeyBox.UI
         public const int ClipboardClearSeconds = 30;
 
         private const string DragFormat = "KeyBox.EntryIds";
+        private const string GroupDragFormat = "KeyBox.GroupId";
+
+        // Свёрнутые ветки дерева групп. Как и положение окна, переживают блокировку,
+        // но не перезапуск программы: состояние интерфейса в файл хранилища не пишется.
+        private static readonly HashSet<string> collapsedGroups = new HashSet<string>();
         private const int ColDescription = 0;
         private const int ColLogin = 1;
         private const int ColPassword = 2;
@@ -52,9 +57,9 @@ namespace KeyBox.UI
 
         private ToolStrip groupBar;
         private ToolStripButton btnGroupAdd;
-        private ToolStripButton btnGroupRename;
+        private ToolStripButton btnGroupEdit;
         private ToolStripButton btnGroupDelete;
-        private GroupListBox lstGroups;
+        private GroupTree treeGroups;
 
         private Panel entriesPane;
         private EntryListView lvEntries;
@@ -305,27 +310,38 @@ namespace KeyBox.UI
             caption.ForeColor = Ui.TextColor;
 
             btnGroupDelete = ToolButton("btnGroupDelete", "Удалить группу", Ui.GlyphDelete, "Удалить группу (Del)", false, delegate { DeleteGroup(); });
-            btnGroupRename = ToolButton("btnGroupRename", "Переименовать группу", Ui.GlyphRename, "Переименовать группу (F2)", false, delegate { RenameGroup(); });
+            btnGroupEdit = ToolButton("btnGroupEdit", "Изменить группу", Ui.GlyphRename, "Переименовать или перенести группу (F2)", false, delegate { EditGroup(); });
             btnGroupAdd = ToolButton("btnGroupAdd", "Новая группа", Ui.GlyphAdd, "Новая группа (Ctrl+G)", false, delegate { AddGroup(); });
             btnGroupDelete.Alignment = ToolStripItemAlignment.Right;
-            btnGroupRename.Alignment = ToolStripItemAlignment.Right;
+            btnGroupEdit.Alignment = ToolStripItemAlignment.Right;
             btnGroupAdd.Alignment = ToolStripItemAlignment.Right;
+            if (!Ui.HasGlyphs)
+            {
+                // Без шрифта со значками кнопки показывают текст, а полные названия
+                // в узкую панель не помещаются — оставляем короткие обозначения.
+                btnGroupAdd.Text = "+";
+                btnGroupEdit.Text = "Изм.";
+                btnGroupDelete.Text = "×";
+            }
 
-            groupBar.Items.AddRange(new ToolStripItem[] { caption, btnGroupDelete, btnGroupRename, btnGroupAdd });
+            groupBar.Items.AddRange(new ToolStripItem[] { caption, btnGroupDelete, btnGroupEdit, btnGroupAdd });
 
-            lstGroups = new GroupListBox();
-            lstGroups.Name = "lstGroups";
-            lstGroups.Dock = DockStyle.Fill;
-            lstGroups.AllowDrop = true;
-            lstGroups.AccessibleName = "Группы";
-            lstGroups.SelectedIndexChanged += OnGroupSelected;
-            lstGroups.MouseDown += OnGroupsMouseDown;
-            lstGroups.KeyDown += OnGroupsKeyDown;
-            lstGroups.DragOver += OnGroupsDragOver;
-            lstGroups.DragLeave += delegate { lstGroups.DropIndex = -1; };
-            lstGroups.DragDrop += OnGroupsDragDrop;
+            treeGroups = new GroupTree();
+            treeGroups.Name = "treeGroups";
+            treeGroups.Dock = DockStyle.Fill;
+            treeGroups.AllowDrop = true;
+            treeGroups.AccessibleName = "Группы";
+            treeGroups.AfterSelect += OnGroupSelected;
+            treeGroups.AfterCollapse += delegate(object sender, TreeViewEventArgs e) { RememberCollapsed(e.Node, true); };
+            treeGroups.AfterExpand += delegate(object sender, TreeViewEventArgs e) { RememberCollapsed(e.Node, false); };
+            treeGroups.MouseDown += OnGroupsMouseDown;
+            treeGroups.KeyDown += OnGroupsKeyDown;
+            treeGroups.ItemDrag += OnGroupsItemDrag;
+            treeGroups.DragOver += OnGroupsDragOver;
+            treeGroups.DragLeave += delegate { treeGroups.DropNode = null; };
+            treeGroups.DragDrop += OnGroupsDragDrop;
 
-            pane.Controls.Add(lstGroups);
+            pane.Controls.Add(treeGroups);
             pane.Controls.Add(groupBar);
             return pane;
         }
@@ -342,9 +358,9 @@ namespace KeyBox.UI
             lvEntries.Dock = DockStyle.Fill;
             lvEntries.AccessibleName = "Записи";
             colDescription = lvEntries.Columns.Add("Описание", Ui.S(300));
-            colLogin = lvEntries.Columns.Add("Логин", Ui.S(210));
-            colPassword = lvEntries.Columns.Add("Пароль", Ui.S(130));
-            colGroup = lvEntries.Columns.Add("Группа", Ui.S(150));
+            colLogin = lvEntries.Columns.Add("Логин", Ui.S(190));
+            colPassword = lvEntries.Columns.Add("Пароль", Ui.S(120));
+            colGroup = lvEntries.Columns.Add("Группа", Ui.S(210));
 
             // Высота строки в стандартном списке задаётся только высотой значка, поэтому
             // подкладываем прозрачный значок шириной в один пиксель — строки становятся просторнее.
@@ -417,16 +433,16 @@ namespace KeyBox.UI
             StyleMenu(groupMenu);
             groupMenu.Name = "groupMenu";
             ToolStripMenuItem miGroupAdd = MenuItem("Новая группа…", "Ctrl+G", delegate { AddGroup(); });
-            ToolStripMenuItem miGroupRename = MenuItem("Переименовать…", "F2", delegate { RenameGroup(); });
+            ToolStripMenuItem miGroupEdit = MenuItem("Изменить…", "F2", delegate { EditGroup(); });
             ToolStripMenuItem miGroupDelete = MenuItem("Удалить группу", "Del", delegate { DeleteGroup(); });
-            groupMenu.Items.AddRange(new ToolStripItem[] { miGroupAdd, new ToolStripSeparator(), miGroupRename, miGroupDelete });
+            groupMenu.Items.AddRange(new ToolStripItem[] { miGroupAdd, new ToolStripSeparator(), miGroupEdit, miGroupDelete });
             groupMenu.Opening += delegate
             {
                 bool isGroup = SelectedGroup() != null;
-                miGroupRename.Enabled = isGroup;
+                miGroupEdit.Enabled = isGroup;
                 miGroupDelete.Enabled = isGroup;
             };
-            lstGroups.ContextMenuStrip = groupMenu;
+            treeGroups.ContextMenuStrip = groupMenu;
         }
 
         /// <summary>Шрифт и размер значков в меню — как во всём окне, при любом масштабе экрана.</summary>
@@ -454,11 +470,10 @@ namespace KeyBox.UI
             RefreshEntries();
         }
 
-        private List<Group> SortedGroups()
+        /// <summary>Все группы в порядке дерева: группа, за ней её подгруппы; соседние — по названию.</summary>
+        private List<Group> GroupsInTreeOrder()
         {
-            var groups = new List<Group>(Data.Groups);
-            groups.Sort(delegate(Group a, Group b) { return Ui.CompareNatural(a.Name, b.Name); });
-            return groups;
+            return Data.TreeOrder(Ui.CompareNatural);
         }
 
         private void RefreshGroups()
@@ -472,42 +487,73 @@ namespace KeyBox.UI
             Dictionary<string, int> counts = Data.CountByGroup(out ungrouped);
 
             refreshing = true;
-            lstGroups.BeginUpdate();
+            treeGroups.BeginUpdate();
             try
             {
-                lstGroups.Items.Clear();
-                lstGroups.Items.Add(MakeGroupItem(FilterKind.All, null, "Все записи", Data.Entries.Count));
-                foreach (Group group in SortedGroups())
-                {
-                    lstGroups.Items.Add(MakeGroupItem(FilterKind.Group, group.Id, group.Name, counts[group.Id]));
-                }
-                lstGroups.Items.Add(MakeGroupItem(FilterKind.Ungrouped, null, "Без группы", ungrouped));
+                treeGroups.Nodes.Clear();
 
-                for (int i = 0; i < lstGroups.Items.Count; i++)
+                TreeNode all = MakeGroupNode(FilterKind.All, null, "Все записи", Data.Entries.Count);
+                treeGroups.Nodes.Add(all);
+
+                // Родительская группа в этом порядке всегда идёт раньше своих подгрупп.
+                var nodes = new Dictionary<string, TreeNode>();
+                foreach (Group group in GroupsInTreeOrder())
                 {
-                    if (((GroupItem)lstGroups.Items[i]).ToFilter().SameAs(filter))
+                    TreeNode node = MakeGroupNode(FilterKind.Group, group.Id, group.Name, counts[group.Id]);
+                    TreeNode parent;
+                    if (group.ParentId != null && nodes.TryGetValue(group.ParentId, out parent))
                     {
-                        lstGroups.SelectedIndex = i;
-                        break;
+                        parent.Nodes.Add(node);
                     }
+                    else
+                    {
+                        treeGroups.Nodes.Add(node);
+                    }
+                    nodes[group.Id] = node;
                 }
+
+                TreeNode none = MakeGroupNode(FilterKind.Ungrouped, null, "Без группы", ungrouped);
+                treeGroups.Nodes.Add(none);
+
+                // Ветки раскрыты, кроме тех, что пользователь свернул сам.
+                foreach (KeyValuePair<string, TreeNode> pair in nodes)
+                {
+                    if (pair.Value.Nodes.Count > 0 && !collapsedGroups.Contains(pair.Key)) pair.Value.Expand();
+                }
+
+                TreeNode selected;
+                if (filter.Kind == FilterKind.Group) selected = nodes[filter.GroupId];
+                else selected = filter.Kind == FilterKind.Ungrouped ? none : all;
+                treeGroups.SelectedNode = selected;
             }
             finally
             {
-                lstGroups.EndUpdate();
+                treeGroups.EndUpdate();
                 refreshing = false;
             }
             UpdateCommands();
         }
 
-        private static GroupItem MakeGroupItem(FilterKind kind, string id, string name, int count)
+        private static TreeNode MakeGroupNode(FilterKind kind, string id, string name, int count)
         {
             var item = new GroupItem();
             item.Kind = kind;
             item.Id = id;
             item.Name = name;
             item.Count = count;
-            return item;
+
+            var node = new TreeNode(name);
+            node.Tag = item;
+            return node;
+        }
+
+        /// <summary>Запоминает, какие ветки свёрнуты, чтобы обновление списка их не раскрывало.</summary>
+        private static void RememberCollapsed(TreeNode node, bool collapsed)
+        {
+            var item = node == null ? null : node.Tag as GroupItem;
+            if (item == null || item.Id == null) return;
+            if (collapsed) collapsedGroups.Add(item.Id);
+            else collapsedGroups.Remove(item.Id);
         }
 
         private void RefreshEntries()
@@ -515,11 +561,8 @@ namespace KeyBox.UI
             var selected = new HashSet<string>(SelectedIds());
             string focusedId = lvEntries.FocusedItem == null ? null : (string)lvEntries.FocusedItem.Tag;
 
-            var groupNames = new Dictionary<string, string>();
-            foreach (Group group in Data.Groups)
-            {
-                groupNames[group.Id] = group.Name;
-            }
+            // В столбце «Группа» показывается полный путь: «Работа / Проекты».
+            Dictionary<string, string> groupNames = Data.GroupPaths();
 
             List<Entry> entries = Data.Query(filter, txtSearch.Text);
             SortEntries(entries, groupNames);
@@ -667,6 +710,11 @@ namespace KeyBox.UI
             {
                 text = "Записей без группы нет.";
             }
+            else if (Data.CountInBranch(filter.GroupId) > 0)
+            {
+                // Группа показывает только свои записи, а здесь все они разложены по подгруппам.
+                text = "В самой группе записей нет — они лежат в её подгруппах.\nВыберите подгруппу слева или воспользуйтесь поиском.";
+            }
             else
             {
                 text = "В этой группе пока нет записей.\nПеретащите записи на группу в списке слева или нажмите «Добавить».";
@@ -705,7 +753,7 @@ namespace KeyBox.UI
             btnMove.Enabled = selected > 0;
 
             bool isGroup = filter.Kind == FilterKind.Group;
-            btnGroupRename.Enabled = isGroup;
+            btnGroupEdit.Enabled = isGroup;
             btnGroupDelete.Enabled = isGroup;
         }
 
@@ -1024,7 +1072,7 @@ namespace KeyBox.UI
             SaveVault();
             RefreshAll();
 
-            string target = groupId == null ? "в «Без группы»" : "в группу «" + Ui.Shorten(Data.GroupName(groupId), 40) + "»";
+            string target = groupId == null ? "в «Без группы»" : "в группу «" + Ui.Shorten(Data.GroupPath(groupId), 60) + "»";
             Flash("Перемещено " + target + ": " + Ui.Plural(moved, "запись", "записи", "записей"));
         }
 
@@ -1032,7 +1080,7 @@ namespace KeyBox.UI
         {
             string[] ids = SelectedIds();
             if (ids.Length == 0) return;
-            Group group = PromptNewGroup();
+            Group group = PromptNewGroup(SuggestedParentId());
             if (group == null) return;
             // Группа уже создана; MoveEntries сохранит её вместе с перемещением.
             MoveEntries(ids, group.Id);
@@ -1061,11 +1109,11 @@ namespace KeyBox.UI
                 else if (common != groupId) sameGroup = false;
             }
 
-            List<Group> groups = SortedGroups();
+            List<Group> groups = GroupsInTreeOrder();
             foreach (Group group in groups)
             {
                 string targetId = group.Id;
-                var item = new ToolStripMenuItem(Ui.MenuText(group.Name));
+                var item = new ToolStripMenuItem(Ui.MenuText(Data.GroupPath(group.Id)));
                 item.Image = folderIcon;
                 item.Enabled = !(sameGroup && common == targetId);
                 item.Click += delegate { MoveEntries(SelectedIds(), targetId); };
@@ -1095,60 +1143,96 @@ namespace KeyBox.UI
         //  Действия с группами
         // =====================================================================
 
-        private Group PromptNewGroup()
+        /// <summary>
+        /// Где предложить создать новую группу: внутри выбранной в дереве,
+        /// а если выбрана не группа — на верхнем уровне. В окне это можно поменять.
+        /// </summary>
+        private string SuggestedParentId()
         {
-            string name = InputBox.Ask(this, "Новая группа", "Название группы", "", "Создать",
-                VaultData.MaxGroupNameLength,
-                delegate(string value) { return Data.ValidateGroupName(value, null); });
-            if (name == null || LockRequested) return null;
+            return filter.Kind == FilterKind.Group ? filter.GroupId : null;
+        }
 
-            try
+        private Group PromptNewGroup(string parentId)
+        {
+            using (var dialog = new GroupForm(Data, null, parentId))
             {
-                return Data.AddGroup(name);
-            }
-            catch (ValidationException ex)
-            {
-                MsgBox.Error(this, "Новая группа", ex.Message);
-                return null;
+                if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return null;
+
+                try
+                {
+                    return Data.AddGroup(dialog.GroupName, dialog.ParentId);
+                }
+                catch (ValidationException ex)
+                {
+                    MsgBox.Error(this, "Новая группа", ex.Message);
+                    return null;
+                }
             }
         }
 
         internal void AddGroup()
         {
-            Group group = PromptNewGroup();
+            Group group = PromptNewGroup(SuggestedParentId());
             if (group == null) return;
 
             SaveVault();
             SetSearchSilently("");
             filter = GroupFilter.ForGroup(group.Id);
             RefreshAll();
-            Flash("Группа «" + Ui.Shorten(group.Name, 40) + "» создана");
+            Flash("Группа «" + Ui.Shorten(Data.GroupPath(group.Id), 60) + "» создана");
         }
 
-        internal void RenameGroup()
+        /// <summary>Меняет название выбранной группы и её место в дереве.</summary>
+        internal void EditGroup()
         {
             Group group = SelectedGroup();
             if (group == null) return;
 
-            string groupId = group.Id;
-            string name = InputBox.Ask(this, "Переименование группы", "Название группы", group.Name, "Переименовать",
-                VaultData.MaxGroupNameLength,
-                delegate(string value) { return Data.ValidateGroupName(value, groupId); });
-            if (name == null || LockRequested || name == group.Name) return;
+            using (var dialog = new GroupForm(Data, group, group.ParentId))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return;
 
+                bool moved = dialog.ParentId != group.ParentId;
+                bool changed;
+                try
+                {
+                    changed = Data.UpdateGroup(group.Id, dialog.GroupName, dialog.ParentId);
+                }
+                catch (ValidationException ex)
+                {
+                    MsgBox.Error(this, "Изменение группы", ex.Message);
+                    RefreshAll();
+                    return;
+                }
+                if (!changed) return;
+
+                SaveVault();
+                RefreshAll();
+                Flash(moved
+                    ? "Группа перенесена: «" + Ui.Shorten(Data.GroupPath(group.Id), 60) + "»"
+                    : "Группа переименована");
+            }
+        }
+
+        /// <summary>Переносит группу в другую (null — на верхний уровень); используется при перетаскивании.</summary>
+        private void MoveGroup(string groupId, string parentId)
+        {
+            bool changed;
             try
             {
-                Data.RenameGroup(groupId, name);
+                changed = Data.MoveGroup(groupId, parentId);
             }
             catch (ValidationException ex)
             {
-                MsgBox.Error(this, "Переименование группы", ex.Message);
+                MsgBox.Error(this, "Перенос группы", ex.Message);
                 RefreshAll();
                 return;
             }
+            if (!changed) return;
+
             SaveVault();
             RefreshAll();
-            Flash("Группа переименована");
+            Flash("Группа перенесена: «" + Ui.Shorten(Data.GroupPath(groupId), 60) + "»");
         }
 
         internal void DeleteGroup()
@@ -1156,13 +1240,25 @@ namespace KeyBox.UI
             Group group = SelectedGroup();
             if (group == null) return;
 
-            int inside = Data.Query(GroupFilter.ForGroup(group.Id), null).Count;
-            string question = "Удалить группу «" + Ui.Shorten(group.Name, 60) + "»?";
-            if (inside > 0)
+            // Вместе с группой удаляются её подгруппы, а записи всей ветки переходят на уровень выше.
+            int subgroups = Data.DescendantsOf(group.Id).Count;
+            int entries = Data.CountInBranch(group.Id);
+            Group parent = Data.FindGroup(group.ParentId);
+
+            string question = "Удалить группу «" + Ui.Shorten(group.Name, 60) + "»";
+            if (subgroups > 0)
             {
+                question += subgroups == 1 ? " вместе с её подгруппой" : " вместе с её подгруппами (" + subgroups + ")";
+            }
+            question += "?";
+            if (entries > 0)
+            {
+                string destination = parent == null
+                    ? "в разделе «Без группы»"
+                    : "в группе «" + Ui.Shorten(parent.Name, 40) + "»";
                 question += "\n\nЗаписи при этом не удаляются: " +
-                            Ui.Plural(inside, "запись", "записи", "записей") +
-                            " из этой группы " + (inside == 1 ? "останется" : "останутся") + " в разделе «Без группы».";
+                            Ui.Plural(entries, "запись", "записи", "записей") + " " +
+                            (entries == 1 ? "окажется" : "окажутся") + " " + destination + ".";
             }
             if (!MsgBox.ConfirmDanger(this, "Удаление группы", question, "Удалить группу") || LockRequested) return;
 
@@ -1177,7 +1273,10 @@ namespace KeyBox.UI
                 return;
             }
             SaveVault();
-            filter = inside > 0 ? GroupFilter.Ungrouped : GroupFilter.All;
+
+            // Показываем место, куда попали записи удалённой ветки.
+            if (parent != null) filter = GroupFilter.ForGroup(parent.Id);
+            else filter = entries > 0 ? GroupFilter.Ungrouped : GroupFilter.All;
             RefreshAll();
             Flash("Группа удалена");
         }
@@ -1315,10 +1414,10 @@ namespace KeyBox.UI
             RefreshEntries();
         }
 
-        private void OnGroupSelected(object sender, EventArgs e)
+        private void OnGroupSelected(object sender, TreeViewEventArgs e)
         {
             if (refreshing) return;
-            var item = lstGroups.SelectedItem as GroupItem;
+            var item = e.Node == null ? null : e.Node.Tag as GroupItem;
             if (item == null) return;
             filter = item.ToFilter();
             RefreshEntries();
@@ -1328,18 +1427,15 @@ namespace KeyBox.UI
         {
             // Правый щелчок сначала выбирает группу, затем открывается её меню.
             if (e.Button != MouseButtons.Right) return;
-            int index = lstGroups.IndexFromPoint(e.Location);
-            if (index >= 0 && index < lstGroups.Items.Count)
-            {
-                lstGroups.SelectedIndex = index;
-            }
+            TreeNode node = treeGroups.GetNodeAt(e.Location);
+            if (node != null) treeGroups.SelectedNode = node;
         }
 
         private void OnGroupsKeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyCode == Keys.F2)
             {
-                RenameGroup();
+                EditGroup();
                 e.Handled = true;
             }
             else if (e.KeyCode == Keys.Delete)
@@ -1349,31 +1445,75 @@ namespace KeyBox.UI
             }
         }
 
-        private void OnGroupsDragOver(object sender, DragEventArgs e)
+        /// <summary>Группу можно перетащить мышью в другую группу или на «Все записи» — на верхний уровень.</summary>
+        private void OnGroupsItemDrag(object sender, ItemDragEventArgs e)
         {
-            int target = -1;
+            if (e.Button != MouseButtons.Left) return;
+            var node = e.Item as TreeNode;
+            var item = node == null ? null : node.Tag as GroupItem;
+            if (item == null || item.Kind != FilterKind.Group) return;
+
+            treeGroups.DoDragDrop(new DataObject(GroupDragFormat, item.Id), DragDropEffects.Move);
+            treeGroups.DropNode = null;
+        }
+
+        /// <summary>
+        /// Определяет, куда упадёт перетаскиваемое. Возвращает строку дерева, которую нужно
+        /// подсветить, или null, если бросать сюда нельзя.
+        /// </summary>
+        private TreeNode FindDropTarget(DragEventArgs e)
+        {
+            TreeNode node = treeGroups.GetNodeAt(treeGroups.PointToClient(new Point(e.X, e.Y)));
+            var item = node == null ? null : node.Tag as GroupItem;
+
             if (e.Data.GetDataPresent(DragFormat))
             {
-                int index = lstGroups.IndexFromPoint(lstGroups.PointToClient(new Point(e.X, e.Y)));
-                if (index >= 0 && index < lstGroups.Items.Count && ((GroupItem)lstGroups.Items[index]).Kind != FilterKind.All)
-                {
-                    target = index;
-                }
+                // Записи — в любую группу или в «Без группы».
+                return item != null && item.Kind != FilterKind.All ? node : null;
             }
-            lstGroups.DropIndex = target;
-            e.Effect = target >= 0 ? DragDropEffects.Move : DragDropEffects.None;
+
+            if (e.Data.GetDataPresent(GroupDragFormat))
+            {
+                Group group = Data.FindGroup(e.Data.GetData(GroupDragFormat) as string);
+                if (group == null || treeGroups.Nodes.Count == 0) return null;
+
+                // «Все записи» и свободное место под деревом означают верхний уровень.
+                if (item == null || item.Kind == FilterKind.All)
+                {
+                    return group.ParentId == null ? null : treeGroups.Nodes[0];
+                }
+                // Нельзя: в «Без группы», туда, где группа уже лежит, в саму себя и в свои подгруппы.
+                if (item.Kind != FilterKind.Group || item.Id == group.ParentId) return null;
+                return Data.ValidateGroupParent(group.Id, item.Id) == null ? node : null;
+            }
+            return null;
+        }
+
+        private void OnGroupsDragOver(object sender, DragEventArgs e)
+        {
+            TreeNode target = FindDropTarget(e);
+            treeGroups.DropNode = target;
+            e.Effect = target != null ? DragDropEffects.Move : DragDropEffects.None;
         }
 
         private void OnGroupsDragDrop(object sender, DragEventArgs e)
         {
-            int target = lstGroups.DropIndex;
-            lstGroups.DropIndex = -1;
-            if (target < 0 || target >= lstGroups.Items.Count) return;
+            TreeNode target = FindDropTarget(e);
+            treeGroups.DropNode = null;
+            var item = target == null ? null : target.Tag as GroupItem;
+            if (item == null) return;
 
-            var item = (GroupItem)lstGroups.Items[target];
-            var ids = e.Data.GetData(DragFormat) as string[];
-            if (ids == null || item.Kind == FilterKind.All) return;
-            MoveEntries(ids, item.Kind == FilterKind.Group ? item.Id : null);
+            string targetId = item.Kind == FilterKind.Group ? item.Id : null;
+            if (e.Data.GetDataPresent(DragFormat))
+            {
+                var ids = e.Data.GetData(DragFormat) as string[];
+                if (ids != null) MoveEntries(ids, targetId);
+            }
+            else if (e.Data.GetDataPresent(GroupDragFormat))
+            {
+                var groupId = e.Data.GetData(GroupDragFormat) as string;
+                if (groupId != null) MoveGroup(groupId, targetId);
+            }
         }
 
         private void OnEntriesItemDrag(object sender, ItemDragEventArgs e)
@@ -1382,7 +1522,7 @@ namespace KeyBox.UI
             string[] ids = SelectedIds();
             if (ids.Length == 0) return;
             lvEntries.DoDragDrop(new DataObject(DragFormat, ids), DragDropEffects.Move);
-            lstGroups.DropIndex = -1;
+            treeGroups.DropNode = null;
         }
 
         private void OnEntriesKeyDown(object sender, KeyEventArgs e)

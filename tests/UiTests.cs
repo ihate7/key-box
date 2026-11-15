@@ -95,13 +95,15 @@ namespace KeyBox.Tests
                 scale = float.Parse(args[scaleIndex + 1], System.Globalization.CultureInfo.InvariantCulture);
             }
 
-            shotDir = Path.Combine(workDir, visible ? "shots-visible" : (scale == 1f ? "shots" : "shots-" + (int)(scale * 100)));
+            bool noIcons = Array.IndexOf(args, "--no-icons") >= 0;
+            shotDir = Path.Combine(workDir, visible ? "shots-visible" : (noIcons ? "shots-no-icons" : (scale == 1f ? "shots" : "shots-" + (int)(scale * 100))));
             Directory.CreateDirectory(shotDir);
-            vaultPath = Path.Combine(workDir, "ui-test.vault");
+            vaultPath = Path.Combine(workDir, "keybox.vault");
             CleanUp();
 
             InitializeForms();
             if (scale != 1f) SimulateScale(scale);
+            if (noIcons) SimulateMissingIconFont();
             Ui.NoActivate = true;
             if (!visible) Ui.TestOrigin = new Point(-30000, -30000);
             Console.WriteLine("screen scale: {0:P0}, glyph font: {1}", Ui.Scale, Ui.HasGlyphs ? "yes" : "no");
@@ -121,6 +123,7 @@ namespace KeyBox.Tests
             Run("entries: delete with confirmation", DeleteEntry);
             Run("groups: rename and delete", RenameAndDeleteGroup);
             Run("long texts do not break the layout", LongTexts);
+            Run("nested groups: subgroups, paths, moving and deleting branches", NestedGroups);
             Run("about box", About);
             Run("failed save is reported and can be retried", SaveFailure);
             Run("every change is already on disk", Persistence);
@@ -154,6 +157,17 @@ namespace KeyBox.Tests
                 if (font != null) field.SetValue(null, new Font(font.FontFamily, font.SizeInPoints * scale, font.Style));
             }
             typeof(Ui).GetField("Scale", BindingFlags.Static | BindingFlags.Public).SetValue(null, Ui.Scale * scale);
+        }
+
+        /// <summary>
+        /// Имитация системы без шрифта со значками (старые версии Windows, часть серверов):
+        /// кнопки должны остаться с текстом, а всё остальное — работать как обычно.
+        /// </summary>
+        private static void SimulateMissingIconFont()
+        {
+            System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(Ui).TypeHandle);
+            typeof(Ui).GetField("HasGlyphs", BindingFlags.Static | BindingFlags.Public).SetValue(null, false);
+            typeof(Ui).GetField("GlyphFont", BindingFlags.Static | BindingFlags.Public).SetValue(null, null);
         }
 
         private static void InitializeForms()
@@ -277,7 +291,8 @@ namespace KeyBox.Tests
             {
                 Ui.GlyphAdd, Ui.GlyphEdit, Ui.GlyphDelete, Ui.GlyphCopy, Ui.GlyphEye, Ui.GlyphLock, Ui.GlyphMore,
                 Ui.GlyphFolder, Ui.GlyphMove, Ui.GlyphList, Ui.GlyphPage, Ui.GlyphRename,
-                Ui.GlyphInfo, Ui.GlyphWarning, Ui.GlyphError, Ui.GlyphQuestion
+                Ui.GlyphInfo, Ui.GlyphWarning, Ui.GlyphError, Ui.GlyphQuestion,
+                Ui.GlyphChevronRight, Ui.GlyphChevronDown
             };
 
             foreach (int glyph in glyphs)
@@ -377,7 +392,7 @@ namespace KeyBox.Tests
             OpenMain();
 
             Check(GroupNames().Length == 2 && GroupNames()[0] == "Все записи" && GroupNames()[1] == "Без группы", "only the built-in rows in the group list");
-            Check(Groups.SelectedIndex == 0, "'all entries' is selected");
+            Check(SelectedGroup() == "Все записи", "'all entries' is selected");
             Check(Entries.Items.Count == 0, "no entries");
             Label empty = Find<Label>(main, "lblEmpty");
             Check(empty.Visible && empty.Text.Contains("Добавить"), "empty state hint: " + empty.Text);
@@ -386,24 +401,28 @@ namespace KeyBox.Tests
             Check(Tool("toolbar", "btnAdd").Enabled, "'add' is enabled");
             Check(!Tool("toolbar", "btnEdit").Enabled && !Tool("toolbar", "btnDelete").Enabled, "'edit' and 'delete' need a selection");
             Check(!Tool("toolbar", "btnCopyLogin").Enabled && !Tool("toolbar", "btnCopyPassword").Enabled && !Tool("toolbar", "btnMove").Enabled, "copy and move need a selection");
-            Check(!Tool("groupBar", "btnGroupRename").Enabled && !Tool("groupBar", "btnGroupDelete").Enabled, "built-in rows cannot be renamed or deleted");
+            Check(!Tool("groupBar", "btnGroupEdit").Enabled && !Tool("groupBar", "btnGroupDelete").Enabled, "built-in rows cannot be renamed or deleted");
             Shot(main, "03-main-empty");
         }
 
         private static void CreateGroups()
         {
             AddGroup("Работа");
-            Check(Groups.SelectedItem.ToString() == "Работа", "a new group becomes selected");
+            Check(SelectedGroup() == "Работа", "a new group becomes selected");
             Check(StatusText("lblMessage").Contains("Работа") && StatusText("lblMessage").Contains("создана"), "status message: " + StatusText("lblMessage"));
             AddGroup("  Личное  ");
             AddGroup("Финансы");
 
-            // Повтор названия (без учёта регистра) и пустое название.
-            Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(InputBox box)
+            // Пустое название и повтор названия (без учёта регистра).
+            SelectGroup("Все записи");
+            Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
             {
                 Label error = Find<Label>(box, "lblError");
-                TextBox input = Find<TextBox>(box, "txtInput");
-                Check(input.Text == "" && !error.Visible, "empty prompt");
+                TextBox input = Find<TextBox>(box, "txtName");
+                ComboBox parent = Find<ComboBox>(box, "cmbParent");
+                Check(box.Text == "Новая группа" && input.Text == "" && !error.Visible, "empty dialog");
+                Check(parent.SelectedItem.ToString() == "Верхний уровень", "the top level is offered when no group is selected");
+                SameList(new[] { "Верхний уровень", "Личное", "Работа", "Финансы" }, ComboItems(parent), "places for the new group");
 
                 Click(box, "btnOk");
                 Check(box.Visible && error.Visible && error.Text.Contains("Введите"), "empty name: " + error.Text);
@@ -445,17 +464,17 @@ namespace KeyBox.Tests
             Check(session.Data.Entries.Count == 0, "a cancelled dialog adds nothing");
 
             AddEntry("Почта Gmail", "ivan.petrov@example.com", "Qw7!kPz#2026mail", "Личное");
-            Check(Groups.SelectedItem.ToString() == "Все записи", "the list stays on 'all entries'");
+            Check(SelectedGroup() == "Все записи", "the list stays on 'all entries'");
             Check(SelectedTitles().Length == 1 && SelectedTitles()[0] == "Почта Gmail", "the new entry is selected");
             Check(StatusText("lblMessage") == "Запись добавлена", "status message: " + StatusText("lblMessage"));
 
             SelectGroup("Работа");
             AddEntry("GitLab — рабочий", "i.petrov", "glpat-N8s2xQ4vT1", "Работа");
-            Check(Groups.SelectedItem.ToString() == "Работа" && Titles().Length == 1, "an entry added into the open group appears in it");
+            Check(SelectedGroup() == "Работа" && Titles().Length == 1, "an entry added into the open group appears in it");
 
             // Запись создаётся в другой группе — список переходит туда, чтобы её было видно.
             AddEntry("Госуслуги", "70001234567", "G0su$lugi-2026", "Личное");
-            Check(Groups.SelectedItem.ToString() == "Личное", "the list follows the new entry to its group");
+            Check(SelectedGroup() == "Личное", "the list follows the new entry to its group");
             Check(SelectedTitles().Length == 1 && SelectedTitles()[0] == "Госуслуги", "and selects it");
 
             SelectGroup("Все записи");
@@ -494,11 +513,11 @@ namespace KeyBox.Tests
             SelectGroup("Работа");
             SameList(new[] { "GitLab — рабочий", "VPN офиса", "Хостинг: панель управления" }, Titles(), "entries of one group");
             Check(StatusText("lblCount") == "Показано: 3 из 8", "counter: " + StatusText("lblCount"));
-            Check(Tool("groupBar", "btnGroupRename").Enabled && Tool("groupBar", "btnGroupDelete").Enabled, "a real group can be renamed and deleted");
+            Check(Tool("groupBar", "btnGroupEdit").Enabled && Tool("groupBar", "btnGroupDelete").Enabled, "a real group can be renamed and deleted");
 
             SelectGroup("Без группы");
             SameList(new[] { "Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей" }, Titles(), "ungrouped entries");
-            Check(!Tool("groupBar", "btnGroupRename").Enabled, "'no group' cannot be renamed");
+            Check(!Tool("groupBar", "btnGroupEdit").Enabled, "'no group' cannot be renamed");
 
             // Новая запись по умолчанию попадает в открытую группу.
             SelectGroup("Работа");
@@ -543,7 +562,7 @@ namespace KeyBox.Tests
                 Click(f, "btnOk");
             });
 
-            Check(Groups.SelectedItem.ToString() == "Личное", "the list follows the entry to its new group");
+            Check(SelectedGroup() == "Личное", "the list follows the entry to its new group");
             Check(SelectedTitles().Length == 1 && SelectedTitles()[0] == "VPN офиса", "the edited entry stays selected");
             Check(Cell("VPN офиса", 1) == "i.petrov@corp.example" && Cell("VPN офиса", 3) == "Личное", "new values are shown");
             Entry entry = FindEntry("VPN офиса");
@@ -587,9 +606,10 @@ namespace KeyBox.Tests
             Check(!MenuItem(MoveMenu(), "Без группы").Enabled, "'no group' is now disabled for it");
 
             // В новую группу, которая создаётся на ходу.
-            Drive<InputBox>(delegate { MenuItem(MoveMenu(), "Новая группа…").PerformClick(); }, delegate(InputBox box)
+            Drive<GroupForm>(delegate { MenuItem(MoveMenu(), "Новая группа…").PerformClick(); }, delegate(GroupForm box)
             {
-                Find<TextBox>(box, "txtInput").Text = "Покупки";
+                Check(Find<ComboBox>(box, "cmbParent").SelectedItem.ToString() == "Верхний уровень", "a new group goes to the top level by default");
+                Find<TextBox>(box, "txtName").Text = "Покупки";
                 Click(box, "btnOk");
             });
             Check(Cell("Ozon", 3) == "Покупки" && GroupCount("Покупки") == 1, "entry moved into the new group");
@@ -610,27 +630,30 @@ namespace KeyBox.Tests
             SelectEntries("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", "Сбербанк Онлайн");
             var data = new DataObject("KeyBox.EntryIds", SelectedIds());
 
-            GroupListBox list = (GroupListBox)Groups;
-            Check(list.AllowDrop, "the group list accepts drops");
+            GroupTree tree = Tree;
+            Check(tree.AllowDrop, "the group tree accepts drops");
 
-            // «Все записи» — не группа, туда бросить нельзя.
-            DragEventArgs over = DragArgs(data, IndexOfGroup("Все записи"));
-            Raise(list, "OnDragOver", over);
-            Check(over.Effect == DragDropEffects.None && list.DropIndex == -1, "'all entries' is not a drop target");
+            // «Все записи» — не группа, записи туда бросить нельзя.
+            DragEventArgs over = DragArgs(data, "Все записи");
+            Raise(tree, "OnDragOver", over);
+            Check(over.Effect == DragDropEffects.None && tree.DropNode == null, "'all entries' is not a drop target for entries");
 
             // Чужие данные не принимаются.
-            DragEventArgs foreign = DragArgs(new DataObject(DataFormats.Text, "text"), IndexOfGroup("Личное"));
-            Raise(list, "OnDragOver", foreign);
+            DragEventArgs foreign = DragArgs(new DataObject(DataFormats.Text, "text"), "Личное");
+            Raise(tree, "OnDragOver", foreign);
             Check(foreign.Effect == DragDropEffects.None, "foreign data is not accepted");
 
-            over = DragArgs(data, IndexOfGroup("Личное"));
-            Raise(list, "OnDragOver", over);
-            Check(over.Effect == DragDropEffects.Move && list.DropIndex == IndexOfGroup("Личное"), "a group is a drop target and is highlighted");
+            over = DragArgs(data, "Личное");
+            Raise(tree, "OnDragOver", over);
+            Check(over.Effect == DragDropEffects.Move && tree.DropNode == GroupNode("Личное"),
+                "a group is a drop target and is highlighted: effect " + over.Effect + ", highlighted " +
+                (tree.DropNode == null ? "nothing" : PathOf(tree.DropNode)) + ", row " + GroupNode("Личное").Bounds +
+                ", point " + tree.PointToClient(new Point(over.X, over.Y)));
             Shot(main, "08-drag-over-group");
 
-            Raise(list, "OnDragDrop", over);
+            Raise(tree, "OnDragDrop", over);
             Pump(50);
-            Check(list.DropIndex == -1, "highlight is removed after the drop");
+            Check(tree.DropNode == null, "highlight is removed after the drop");
             Check(Cell("Сбербанк Онлайн", 3) == "Личное" && Cell("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", 3) == "Личное", "dropped entries moved");
             Check(GroupCount("Личное") == 5 && GroupCount("Финансы") == 0, "counters after the drop");
 
@@ -643,32 +666,32 @@ namespace KeyBox.Tests
 
             // Обратно: в «Без группы» и в «Финансы».
             SelectEntries("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей");
-            DragEventArgs toNone = DragArgs(new DataObject("KeyBox.EntryIds", SelectedIds()), IndexOfGroup("Без группы"));
-            Raise(list, "OnDragOver", toNone);
+            DragEventArgs toNone = DragArgs(new DataObject("KeyBox.EntryIds", SelectedIds()), "Без группы");
+            Raise(tree, "OnDragOver", toNone);
             Check(toNone.Effect == DragDropEffects.Move, "'no group' is a drop target");
-            Raise(list, "OnDragDrop", toNone);
+            Raise(tree, "OnDragDrop", toNone);
             Pump(50);
             Check(Cell("Wi-Fi дома Сеть HomeNet_5G, роутер в прихожей", 3) == "", "entry dropped on 'no group'");
 
             SelectEntries("Сбербанк Онлайн", "Госуслуги");
-            DragEventArgs toFinance = DragArgs(new DataObject("KeyBox.EntryIds", SelectedIds()), IndexOfGroup("Финансы"));
-            Raise(list, "OnDragOver", toFinance);
-            Raise(list, "OnDragDrop", toFinance);
+            DragEventArgs toFinance = DragArgs(new DataObject("KeyBox.EntryIds", SelectedIds()), "Финансы");
+            Raise(tree, "OnDragOver", toFinance);
+            Raise(tree, "OnDragDrop", toFinance);
             Pump(50);
             Check(GroupCount("Финансы") == 2 && GroupCount("Личное") == 2, "entries dropped back");
 
-            // Уход курсора со списка снимает подсветку.
-            Raise(list, "OnDragOver", DragArgs(data, IndexOfGroup("Работа")));
-            Check(list.DropIndex >= 0, "highlight is on");
-            Raise(list, "OnDragLeave", EventArgs.Empty);
-            Check(list.DropIndex == -1, "highlight is off after the cursor leaves");
+            // Уход курсора с дерева снимает подсветку.
+            Raise(tree, "OnDragOver", DragArgs(data, "Работа"));
+            Check(tree.DropNode != null, "highlight is on");
+            Raise(tree, "OnDragLeave", EventArgs.Empty);
+            Check(tree.DropNode == null, "highlight is off after the cursor leaves");
         }
 
         private static void Search()
         {
             SelectGroup("Работа");
             SetSearch("petrov");
-            Check(Groups.SelectedItem.ToString() == "Все записи", "search starts across all groups");
+            Check(SelectedGroup() == "Все записи", "search starts across all groups");
             SameList(new[] { "GitLab — рабочий", "Ozon", "VPN офиса", "Почта Gmail", "Хостинг: панель управления" }, Titles(), "search by login");
             Check(StatusText("lblCount") == "Показано: 5 из 8", "counter: " + StatusText("lblCount"));
 
@@ -744,7 +767,7 @@ namespace KeyBox.Tests
 
             // Ins открывает новую запись, Ctrl+G — новую группу.
             Drive<EntryForm>(delegate { Key(Keys.Insert); }, delegate(EntryForm f) { Click(f, "btnCancel"); });
-            Drive<InputBox>(delegate { Key(Keys.Control | Keys.G); }, delegate(InputBox box) { Click(box, "btnCancel"); });
+            Drive<GroupForm>(delegate { Key(Keys.Control | Keys.G); }, delegate(GroupForm box) { Click(box, "btnCancel"); });
 
             // В списке: Ctrl+A, F2, Del.
             Raise(Entries, "OnKeyDown", new KeyEventArgs(Keys.Control | Keys.A));
@@ -768,13 +791,13 @@ namespace KeyBox.Tests
 
             // В списке групп: F2 и Del.
             SelectGroup("Покупки");
-            Drive<InputBox>(delegate { Raise(Groups, "OnKeyDown", new KeyEventArgs(Keys.F2)); }, delegate(InputBox box)
+            Drive<GroupForm>(delegate { Raise(Tree, "OnKeyDown", new KeyEventArgs(Keys.F2)); }, delegate(GroupForm box)
             {
-                Check(Find<TextBox>(box, "txtInput").Text == "Покупки", "F2 renames the selected group");
+                Check(box.Text == "Изменение группы" && Find<TextBox>(box, "txtName").Text == "Покупки", "F2 opens the selected group");
                 Click(box, "btnCancel");
             });
-            Drive<MsgBox>(delegate { Raise(Groups, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box) { Click(box, "btnCancel"); });
-            Check(IndexOfGroup("Покупки") > 0, "the group is still there after 'cancel'");
+            Drive<MsgBox>(delegate { Raise(Tree, "OnKeyDown", new KeyEventArgs(Keys.Delete)); }, delegate(MsgBox box) { Click(box, "btnCancel"); });
+            Check(HasGroup("Покупки"), "the group is still there after 'cancel'");
         }
 
         private static void DeleteEntry()
@@ -814,11 +837,12 @@ namespace KeyBox.Tests
         private static void RenameAndDeleteGroup()
         {
             SelectGroup("Работа");
-            Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupRename"); }, delegate(InputBox box)
+            Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupEdit"); }, delegate(GroupForm box)
             {
-                TextBox input = Find<TextBox>(box, "txtInput");
+                TextBox input = Find<TextBox>(box, "txtName");
                 Label error = Find<Label>(box, "lblError");
                 Check(input.Text == "Работа", "current name is offered");
+                Check(Find<ComboBox>(box, "cmbParent").SelectedItem.ToString() == "Верхний уровень", "current place is offered");
 
                 input.Text = "личное";
                 Click(box, "btnOk");
@@ -828,7 +852,7 @@ namespace KeyBox.Tests
                 Click(box, "btnOk");
             });
             SameList(new[] { "Все записи", "Личное", "Покупки", "Работа и проекты", "Финансы", "Без группы" }, GroupNames(), "renamed group");
-            Check(Groups.SelectedItem.ToString() == "Работа и проекты", "renamed group stays selected");
+            Check(SelectedGroup() == "Работа и проекты", "renamed group stays selected");
             Check(Cell("GitLab — рабочий", 3) == "Работа и проекты", "entries show the new name");
 
             // Удаление группы с записями: записи остаются.
@@ -841,9 +865,9 @@ namespace KeyBox.Tests
                 Shot(box, "12-confirm-delete-group");
                 Click(box, "btnOk");
             });
-            Check(IndexOfGroup("Финансы") < 0, "group is deleted");
+            Check(!HasGroup("Финансы"), "group is deleted");
             Check(session.Data.Entries.Count == before, "entries are kept");
-            Check(Groups.SelectedItem.ToString() == "Без группы", "the list shows where the entries went");
+            Check(SelectedGroup() == "Без группы", "the list shows where the entries went");
             Check(Titles().Length == 3 && Cell("Сбербанк Онлайн", 3) == "", "released entries are ungrouped");
 
             // Пустая группа удаляется без пояснений про записи.
@@ -858,7 +882,7 @@ namespace KeyBox.Tests
                 Click(box, "btnOk");
             });
             SameList(new[] { "Все записи", "Личное", "Работа и проекты", "Без группы" }, GroupNames(), "groups after deletion");
-            Check(Groups.SelectedItem.ToString() == "Все записи", "selection returns to all entries");
+            Check(SelectedGroup() == "Все записи", "selection returns to all entries");
         }
 
         private static void LongTexts()
@@ -977,6 +1001,223 @@ namespace KeyBox.Tests
             ClipboardGuard.ClearIfOwned();
         }
 
+        /// <summary>
+        /// Вложенные группы. К началу сценария в хранилище две группы («Личное», «Работа и проекты»)
+        /// и семь записей; в конце всё добавленное убирается, и остаётся то же самое.
+        /// </summary>
+        private static void NestedGroups()
+        {
+            // --- Подгруппа создаётся внутри выбранной группы.
+            SelectGroup("Работа и проекты");
+            Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
+            {
+                ComboBox parent = Find<ComboBox>(box, "cmbParent");
+                Check(parent.SelectedItem.ToString() == "Работа и проекты", "the selected group is offered as the place for a new one");
+                SameList(new[] { "Верхний уровень", "Личное", "Работа и проекты" }, ComboItems(parent), "places for the new group");
+                Find<TextBox>(box, "txtName").Text = "Серверы";
+                Shot(box, "23-new-subgroup");
+                Click(box, "btnOk");
+            });
+            Check(SelectedGroup() == "Работа и проекты / Серверы", "the new subgroup is selected: " + SelectedGroup());
+            Check(StatusText("lblMessage").Contains("Работа и проекты / Серверы"), "status names the full path: " + StatusText("lblMessage"));
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "> Серверы", "Без группы" }, GroupNames(), "tree with a subgroup");
+
+            // Третий уровень.
+            AddGroup("Тестовые", "Работа и проекты / Серверы");
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "> Серверы", ">> Тестовые", "Без группы" }, GroupNames(), "tree with three levels");
+            Check(session.Data.Groups.Count == 4, "groups in the vault");
+
+            // Среди соседних групп название не повторяется.
+            SelectGroup("Работа и проекты");
+            Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
+            {
+                Label error = Find<Label>(box, "lblError");
+                Find<TextBox>(box, "txtName").Text = "серверы";
+                Click(box, "btnOk");
+                Check(box.Visible && error.Visible && error.Text.Contains("уже есть подгруппа"), "a sibling with the same name is rejected: " + error.Text);
+                SelectCombo(Find<ComboBox>(box, "cmbParent"), "Личное");
+                Check(!error.Visible, "choosing another place clears the error");
+                Click(box, "btnCancel");
+            });
+            Check(session.Data.Groups.Count == 4, "a cancelled dialog adds nothing");
+
+            // --- Записи во вложенных группах.
+            SelectGroup("Все записи");
+            AddEntry("Сервер сборки", "build", "B1ld-pass", "Работа и проекты / Серверы");
+            AddEntry("Тестовый стенд", "qa", "Qa-pass", "Работа и проекты / Серверы / Тестовые");
+            Check(SelectedGroup() == "Все записи" && Titles().Length == 9, "new entries are visible in 'all entries'");
+            Check(Cell("Сервер сборки", 3) == "Работа и проекты / Серверы", "the group column shows the full path: " + Cell("Сервер сборки", 3));
+            Check(Cell("Тестовый стенд", 3) == "Работа и проекты / Серверы / Тестовые", "path of the third level");
+            Check(GroupCount("Работа и проекты") == 1 && GroupCount("Работа и проекты / Серверы") == 1 &&
+                  GroupCount("Работа и проекты / Серверы / Тестовые") == 1 && GroupCount("Все записи") == 9,
+                "each group counts its own entries only");
+
+            // Группа показывает только свои записи; подгруппы — отдельно.
+            SelectGroup("Работа и проекты");
+            SameList(new[] { "GitLab — рабочий" }, Titles(), "a parent group lists its own entries");
+            SelectGroup("Работа и проекты / Серверы");
+            SameList(new[] { "Сервер сборки" }, Titles(), "a subgroup lists its entries");
+
+            // Новая запись по умолчанию попадает в открытую подгруппу.
+            Drive<EntryForm>(delegate { ClickTool("toolbar", "btnAdd"); }, delegate(EntryForm f)
+            {
+                ComboBox groups = Find<ComboBox>(f, "cmbGroup");
+                Check(groups.SelectedItem.ToString() == "Работа и проекты / Серверы", "the open subgroup is preselected: " + groups.SelectedItem);
+                SameList(new[] { "Без группы", "Личное", "Работа и проекты", "Работа и проекты / Серверы", "Работа и проекты / Серверы / Тестовые" },
+                    ComboItems(groups), "group choices are full paths in tree order");
+                Click(f, "btnCancel");
+            });
+
+            // Меню «В группу» — те же пути.
+            SelectGroup("Работа и проекты");
+            SelectEntries("GitLab — рабочий");
+            SameList(new[] { "Личное", "Работа и проекты", "Работа и проекты / Серверы", "Работа и проекты / Серверы / Тестовые", "-", "Без группы", "-", "Новая группа…" },
+                MenuTexts(MoveMenu()), "'to group' menu with nested groups");
+            MenuItem(MoveMenu(), "Работа и проекты / Серверы").PerformClick();
+            Pump(50);
+            Label empty = Find<Label>(main, "lblEmpty");
+            Check(Titles().Length == 0 && empty.Visible && empty.Text.Contains("подгруппах"),
+                "a group whose entries are all in subgroups says so: " + empty.Text);
+            Shot(main, "24-entries-in-subgroups");
+
+            // Поиск по названию группы находит и записи её подгрупп.
+            SetSearch("проекты");
+            SameList(new[] { "GitLab — рабочий", "Сервер сборки", "Тестовый стенд" }, Titles(), "search by the parent group name");
+            SetSearch("");
+
+            SelectGroup("Все записи");
+            SelectEntries("Сервер сборки");
+            Shot(main, "25-nested-groups");
+
+            // --- Ветка сворачивается и остаётся свёрнутой при обновлении списка.
+            ClickArrow("Работа и проекты");
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "Без группы" }, GroupNames(), "a collapsed branch hides its subgroups");
+            InvokeMain("RefreshAll");
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "Без группы" }, GroupNames(), "the branch stays collapsed after a refresh");
+            SameList(new[] { "Сервер сборки" }, SelectedTitles(), "the selected entry survives the refresh");
+
+            // Щелчок по стрелке раскрывает ветку и не меняет выбранную группу.
+            ClickArrow("Работа и проекты");
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "> Серверы", ">> Тестовые", "Без группы" }, GroupNames(), "the arrow expands the branch");
+            Check(SelectedGroup() == "Все записи", "a click on the arrow keeps the selection");
+            ClickArrow("Работа и проекты");
+            Check(GroupNames().Length == 4, "the arrow collapses the branch again");
+            ClickArrow("Работа и проекты");
+
+            // Выбор группы из свёрнутой ветки раскрывает её.
+            ClickArrow("Работа и проекты");
+            SelectGroup("Работа и проекты / Серверы / Тестовые");
+            Check(GroupNames().Length == 6 && SelectedGroup() == "Работа и проекты / Серверы / Тестовые", "selecting a hidden subgroup expands its branch");
+
+            // --- Изменение группы: название и место в дереве одним окном.
+            SelectGroup("Работа и проекты / Серверы");
+            Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupEdit"); }, delegate(GroupForm box)
+            {
+                ComboBox parent = Find<ComboBox>(box, "cmbParent");
+                Check(box.Text == "Изменение группы" && Find<TextBox>(box, "txtName").Text == "Серверы", "the name is loaded");
+                Check(parent.SelectedItem.ToString() == "Работа и проекты", "the place is loaded");
+                // Саму группу и её подгруппы выбрать местом нельзя — их нет в списке.
+                SameList(new[] { "Верхний уровень", "Личное", "Работа и проекты" }, ComboItems(parent), "allowed places");
+                Find<TextBox>(box, "txtName").Text = "Серверы и стенды";
+                SelectCombo(parent, "Личное");
+                Shot(box, "26-edit-group");
+                Click(box, "btnOk");
+            });
+            Check(SelectedGroup() == "Личное / Серверы и стенды", "the moved group stays selected: " + SelectedGroup());
+            Check(StatusText("lblMessage").Contains("перенесена"), "status: " + StatusText("lblMessage"));
+            SameList(new[] { "Все записи", "Личное", "> Серверы и стенды", ">> Тестовые", "Работа и проекты", "Без группы" }, GroupNames(), "the branch moved as a whole");
+            SelectGroup("Все записи");
+            Check(Cell("Сервер сборки", 3) == "Личное / Серверы и стенды" && Cell("Тестовый стенд", 3) == "Личное / Серверы и стенды / Тестовые",
+                "entries follow their groups");
+
+            // --- Перетаскивание групп.
+            GroupTree tree = Tree;
+            var dragged = new DataObject("KeyBox.GroupId", GroupId("Личное / Серверы и стенды"));
+
+            DragEventArgs toWork = DragArgs(dragged, "Работа и проекты");
+            Raise(tree, "OnDragOver", toWork);
+            Check(toWork.Effect == DragDropEffects.Move && tree.DropNode == GroupNode("Работа и проекты"), "another group accepts a group");
+            Shot(main, "27-drag-group");
+
+            // Нельзя: туда, где группа уже лежит, в саму себя, в свою подгруппу и в «Без группы».
+            foreach (string forbidden in new[] { "Личное", "Личное / Серверы и стенды", "Личное / Серверы и стенды / Тестовые", "Без группы" })
+            {
+                DragEventArgs refused = DragArgs(dragged, forbidden);
+                Raise(tree, "OnDragOver", refused);
+                Check(refused.Effect == DragDropEffects.None && tree.DropNode == null, "a group cannot be dropped on: " + forbidden);
+            }
+
+            // «Все записи» и свободное место под деревом означают верхний уровень.
+            DragEventArgs toTop = DragArgs(dragged, "Все записи");
+            Raise(tree, "OnDragOver", toTop);
+            Check(toTop.Effect == DragDropEffects.Move && tree.DropNode == GroupNode("Все записи"), "'all entries' means the top level");
+            DragEventArgs below = DragArgsBelowTree(dragged);
+            Raise(tree, "OnDragOver", below);
+            Check(below.Effect == DragDropEffects.Move && tree.DropNode == GroupNode("Все записи"), "free space under the tree means the top level too");
+            DragEventArgs alreadyTop = DragArgs(new DataObject("KeyBox.GroupId", GroupId("Личное")), "Все записи");
+            Raise(tree, "OnDragOver", alreadyTop);
+            Check(alreadyTop.Effect == DragDropEffects.None, "a top-level group cannot go higher");
+
+            Raise(tree, "OnDragDrop", toWork);
+            Pump(50);
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "> Серверы и стенды", ">> Тестовые", "Без группы" }, GroupNames(), "the group is dropped into another group");
+            Check(tree.DropNode == null && StatusText("lblMessage").Contains("Работа и проекты / Серверы и стенды"), "status after the drop: " + StatusText("lblMessage"));
+
+            DragEventArgs up = DragArgs(new DataObject("KeyBox.GroupId", GroupId("Работа и проекты / Серверы и стенды / Тестовые")), "Все записи");
+            Raise(tree, "OnDragOver", up);
+            Raise(tree, "OnDragDrop", up);
+            Pump(50);
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "> Серверы и стенды", "Тестовые", "Без группы" }, GroupNames(), "a subgroup is dropped onto the top level");
+
+            // Одинаковые названия на одном уровне: перенос отклоняется с объяснением.
+            AddGroup("Тестовые", "Личное");
+            DragEventArgs clash = DragArgs(new DataObject("KeyBox.GroupId", GroupId("Личное / Тестовые")), "Все записи");
+            Raise(tree, "OnDragOver", clash);
+            Check(clash.Effect == DragDropEffects.Move, "the place itself is allowed");
+            Drive<MsgBox>(delegate { Raise(Tree, "OnDragDrop", clash); }, delegate(MsgBox box)
+            {
+                Check(Find<Label>(box, "lblText").Text.Contains("уже существует"), "the clash is explained: " + Find<Label>(box, "lblText").Text);
+                Click(box, "btnOk");
+            });
+            Check(HasGroup("Личное / Тестовые"), "the group stays where it was");
+
+            // --- Удаление. Пустая подгруппа: простой вопрос, выбранной становится родительская группа.
+            SelectGroup("Личное / Тестовые");
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box)
+            {
+                string text = Find<Label>(box, "lblText").Text;
+                Check(text.Contains("«Тестовые»") && !text.Contains("подгрупп") && !text.Contains("Записи"), "plain question for an empty group: " + text);
+                Click(box, "btnOk");
+            });
+            Check(SelectedGroup() == "Личное" && !HasGroup("Личное / Тестовые"), "after deleting a subgroup its parent is selected");
+
+            // Группа с подгруппой и записями из середины дерева: записи поднимаются в родительскую группу.
+            DragEventArgs back = DragArgs(new DataObject("KeyBox.GroupId", GroupId("Тестовые")), "Работа и проекты / Серверы и стенды");
+            Raise(tree, "OnDragOver", back);
+            Raise(tree, "OnDragDrop", back);
+            Pump(50);
+            SelectGroup("Работа и проекты / Серверы и стенды");
+            Drive<MsgBox>(delegate { ClickTool("groupBar", "btnGroupDelete"); }, delegate(MsgBox box)
+            {
+                string text = Find<Label>(box, "lblText").Text;
+                Check(text.Contains("вместе с её подгруппой") && text.Contains("3 записи") && text.Contains("в группе «Работа и проекты»"),
+                    "the question explains what happens: " + text);
+                Shot(box, "28-delete-branch");
+                Click(box, "btnOk");
+            });
+            Check(SelectedGroup() == "Работа и проекты", "the parent group is selected after the deletion");
+            SameList(new[] { "Все записи", "Личное", "Работа и проекты", "Без группы" }, GroupNames(), "the branch is gone");
+            SameList(new[] { "GitLab — рабочий", "Сервер сборки", "Тестовый стенд" }, Titles(), "entries of the branch moved up to the parent");
+            Check(session.Data.Entries.Count == 9, "no entry is lost");
+
+            // Убираем добавленное: остаются прежние две группы и семь записей.
+            SelectEntries("Сервер сборки", "Тестовый стенд");
+            Drive<MsgBox>(delegate { ClickTool("toolbar", "btnDelete"); }, delegate(MsgBox box) { Click(box, "btnOk"); });
+            SelectGroup("Все записи");
+            Check(session.Data.Groups.Count == 2 && session.Data.Entries.Count == 7 && Cell("GitLab — рабочий", 3) == "Работа и проекты",
+                "the vault is back to its previous shape");
+        }
+
         private static void About()
         {
             Drive<MsgBox>(delegate { ClickTool("toolbar", "miAbout"); }, delegate(MsgBox box)
@@ -1026,9 +1267,10 @@ namespace KeyBox.Tests
                 // Следующее изменение: сбой повторяется, препятствие устраняют и жмут «Повторить».
                 Drive<MsgBox>(delegate
                 {
-                    Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(InputBox box)
+                    Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
                     {
-                        Find<TextBox>(box, "txtInput").Text = "Группа при сбое";
+                        Find<TextBox>(box, "txtName").Text = "Группа при сбое";
+                        SelectCombo(Find<ComboBox>(box, "cmbParent"), "Верхний уровень");
                         Click(box, "btnOk");
                     });
                 }, delegate(MsgBox box)
@@ -1249,9 +1491,19 @@ namespace KeyBox.Tests
 
         private static void AddGroup(string name)
         {
-            Drive<InputBox>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(InputBox box)
+            AddGroup(name, null);
+        }
+
+        /// <summary>
+        /// Создаёт группу через окно «Новая группа». parent — путь к группе, в которую её вложить
+        /// («Работа / Проекты»), или null для верхнего уровня.
+        /// </summary>
+        private static void AddGroup(string name, string parent)
+        {
+            Drive<GroupForm>(delegate { ClickTool("groupBar", "btnGroupAdd"); }, delegate(GroupForm box)
             {
-                Find<TextBox>(box, "txtInput").Text = name;
+                Find<TextBox>(box, "txtName").Text = name;
+                SelectCombo(Find<ComboBox>(box, "cmbParent"), parent ?? "Верхний уровень");
                 Click(box, "btnOk");
             });
         }
@@ -1269,11 +1521,31 @@ namespace KeyBox.Tests
             });
         }
 
-        private static void SelectGroup(string name)
+        /// <summary>Выбирает строку дерева групп по пути: «Работа / Проекты», «Все записи».</summary>
+        private static void SelectGroup(string path)
         {
-            int index = IndexOfGroup(name);
-            if (index < 0) throw new Exception("no such group in the list: " + name);
-            Groups.SelectedIndex = index;
+            Tree.SelectedNode = GroupNode(path);
+            Pump(30);
+        }
+
+        /// <summary>Щелчок мышью по стрелке, которая сворачивает и раскрывает ветку.</summary>
+        private static void ClickArrow(string path)
+        {
+            GroupTree tree = Tree;
+            Rectangle arrow = tree.ArrowBounds(GroupNode(path));
+            int x = arrow.X + arrow.Width / 2;
+            int y = arrow.Y + arrow.Height / 2;
+            var position = (IntPtr)((y << 16) | (x & 0xFFFF));
+            NativeMethods.SendMessage(tree.Handle, 0x0201, (IntPtr)1, position);    // WM_LBUTTONDOWN
+            NativeMethods.SendMessage(tree.Handle, 0x0202, IntPtr.Zero, position);  // WM_LBUTTONUP
+            Pump(30);
+        }
+
+        /// <summary>Вызывает закрытый метод главного окна без параметров.</summary>
+        private static void InvokeMain(string method)
+        {
+            MethodInfo info = typeof(MainForm).GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic);
+            info.Invoke(main, null);
             Pump(30);
         }
 
@@ -1376,11 +1648,27 @@ namespace KeyBox.Tests
             throw new Exception("method not found: " + method);
         }
 
-        private static DragEventArgs DragArgs(IDataObject data, int groupIndex)
+        /// <summary>Событие перетаскивания над строкой дерева групп с указанным путём.</summary>
+        private static DragEventArgs DragArgs(IDataObject data, string path)
         {
-            ListBox list = Groups;
-            Rectangle item = list.GetItemRectangle(groupIndex);
-            Point screen = list.PointToScreen(new Point(item.X + item.Width / 2, item.Y + item.Height / 2));
+            GroupTree tree = Tree;
+            Rectangle label = GroupNode(path).Bounds;
+            for (int attempt = 0; label.Height == 0 && attempt < 100; attempt++)
+            {
+                // Дерево рассчитывает положение строк не сразу после обновления — дожидаемся.
+                Pump(20);
+                label = GroupNode(path).Bounds;
+            }
+            if (label.Height == 0) throw new Exception("the tree has no position for the row: " + path);
+            Point screen = tree.PointToScreen(new Point(Ui.S(80), label.Y + label.Height / 2));
+            return new DragEventArgs(data, 0, screen.X, screen.Y, DragDropEffects.Move, DragDropEffects.None);
+        }
+
+        /// <summary>Событие перетаскивания над свободным местом под деревом групп.</summary>
+        private static DragEventArgs DragArgsBelowTree(IDataObject data)
+        {
+            GroupTree tree = Tree;
+            Point screen = tree.PointToScreen(new Point(Ui.S(80), tree.ClientSize.Height - 3));
             return new DragEventArgs(data, 0, screen.X, screen.Y, DragDropEffects.Move, DragDropEffects.None);
         }
 
@@ -1416,9 +1704,9 @@ namespace KeyBox.Tests
         //  Чтение состояния окна
         // =====================================================================
 
-        private static ListBox Groups
+        private static GroupTree Tree
         {
-            get { return Find<ListBox>(main, "lstGroups"); }
+            get { return Find<GroupTree>(main, "treeGroups"); }
         }
 
         private static ListView Entries
@@ -1452,28 +1740,67 @@ namespace KeyBox.Tests
             return Tool("status", name).Text;
         }
 
+        /// <summary>Видимые строки дерева групп сверху вниз; уровень вложенности показан знаками «>».</summary>
         private static string[] GroupNames()
         {
             var names = new List<string>();
-            foreach (object item in Groups.Items) names.Add(item.ToString());
+            CollectRows(Tree.Nodes, names);
             return names.ToArray();
         }
 
-        private static int IndexOfGroup(string name)
+        private static void CollectRows(TreeNodeCollection nodes, List<string> names)
         {
-            ListBox list = Groups;
-            for (int i = 0; i < list.Items.Count; i++)
+            foreach (TreeNode node in nodes)
             {
-                if (list.Items[i].ToString() == name) return i;
+                names.Add((node.Level > 0 ? new string('>', node.Level) + " " : "") + node.Text);
+                if (node.IsExpanded) CollectRows(node.Nodes, names);
             }
-            return -1;
         }
 
-        private static int GroupCount(string name)
+        /// <summary>Путь строки дерева: «Работа / Проекты».</summary>
+        private static string PathOf(TreeNode node)
         {
-            int index = IndexOfGroup(name);
-            if (index < 0) throw new Exception("no such group in the list: " + name);
-            return ((GroupItem)Groups.Items[index]).Count;
+            return node.Parent == null ? node.Text : PathOf(node.Parent) + " / " + node.Text;
+        }
+
+        private static TreeNode FindGroupNode(TreeNodeCollection nodes, string path)
+        {
+            foreach (TreeNode node in nodes)
+            {
+                if (PathOf(node) == path) return node;
+                TreeNode nested = FindGroupNode(node.Nodes, path);
+                if (nested != null) return nested;
+            }
+            return null;
+        }
+
+        private static bool HasGroup(string path)
+        {
+            return FindGroupNode(Tree.Nodes, path) != null;
+        }
+
+        private static TreeNode GroupNode(string path)
+        {
+            TreeNode node = FindGroupNode(Tree.Nodes, path);
+            if (node == null) throw new Exception("no such group in the tree: " + path);
+            return node;
+        }
+
+        private static string GroupId(string path)
+        {
+            return ((GroupItem)GroupNode(path).Tag).Id;
+        }
+
+        private static int GroupCount(string path)
+        {
+            return ((GroupItem)GroupNode(path).Tag).Count;
+        }
+
+        /// <summary>Путь выбранной строки дерева групп.</summary>
+        private static string SelectedGroup()
+        {
+            TreeNode node = Tree.SelectedNode;
+            return node == null ? "(nothing)" : PathOf(node);
         }
 
         private static string[] Titles()
