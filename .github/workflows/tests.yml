@@ -1,0 +1,46 @@
+# Сборка и все тесты на чистых системах GitHub: при каждом изменении в main,
+# в запросах на слияние и по кнопке «Run workflow».
+name: Тесты
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Сборка
+        shell: cmd
+        run: call build.cmd
+
+      - name: Тесты
+        shell: cmd
+        run: call tests\run-tests.cmd
+
+      # Снимки окон помогают понять, что пошло не так.
+      - name: Снимки окон (если тесты не прошли)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-${{ matrix.os }}
+          path: tests/out/ui/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
