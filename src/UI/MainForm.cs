@@ -1139,7 +1139,10 @@ namespace KeyBox.UI
             catch (ObjectDisposedException) { return; }
 
             ShowMerged(false);
-            if (session.HasUnwrittenChanges) SetDirty(true);
+
+            // Файл прочитан и сверен: предупреждение о несохранённом теперь зависит только от того,
+            // осталось ли в памяти что-то, чего в нём нет.
+            SetDirty(session.HasUnwrittenChanges);
         }
 
         /// <summary>
@@ -1213,9 +1216,9 @@ namespace KeyBox.UI
                 {
                     text += "\n\n" + L.F(
                         "Ваши последние изменения сохранены рядом, в отдельном файле «{0}»: он открывается прежним паролем. " +
-                        "Вернуть их в хранилище можно командой «Ещё → Объединить с файлом…».",
+                        "Вернуть их в хранилище можно командой «Объединить с файлом…» из меню справа на панели.",
                         "Your latest changes have been saved next to it, in a separate file “{0}”, which opens with the previous password. " +
-                        "Bring them back into the vault with “More → Merge with a file…”.",
+                        "Bring them back into the vault with “Merge with a file…” in the menu on the right of the toolbar.",
                         Path.GetFileName(copy));
                 }
                 if (lockNow)

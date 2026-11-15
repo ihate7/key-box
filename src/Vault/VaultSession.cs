@@ -211,6 +211,7 @@ namespace KeyBox.Vault
             lock (sync)
             {
                 if (disposed) throw new ObjectDisposedException("VaultSession");
+                HasUnwrittenChanges = true; // пока запись не удалась, изменения есть только в памяти
                 MergeFromDisk();
                 WriteCurrent();
                 unattendedWrites = 0;
