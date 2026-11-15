@@ -40,6 +40,15 @@ namespace KeyBox
             return current == Language.English ? english : russian;
         }
 
+        /// <summary>
+        /// Текст, который не переводится: например, название языка в списке языков
+        /// показывается на самом этом языке при любом языке интерфейса.
+        /// </summary>
+        public static string Native(string text)
+        {
+            return text;
+        }
+
         /// <summary>Строка на текущем языке с подстановкой значений, как в string.Format.</summary>
         public static string F(string russian, string english, params object[] arguments)
         {

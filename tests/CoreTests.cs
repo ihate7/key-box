@@ -81,6 +81,7 @@ namespace KeyBox.Tests
             Run("localisation: plural forms, dates, language choice", LocalisationBasics);
             Run("localisation: every text in the sources has both languages", LocalisationCoverage);
             Run("generator: alphabet, classes, uniqueness", GeneratorProperties);
+            Run("generator: options from the settings", GeneratorOptions);
             Run("large vault: 5000 entries", LargeVault);
             Run("interop: files shared with the Node.js implementation", Interop);
             Run("kdf: timing with default parameters", KdfTiming);
@@ -1567,6 +1568,7 @@ namespace KeyBox.Tests
                     if (HasCyrillic(literal))
                     {
                         LocalisationCall call = calls.Count > 0 ? calls[calls.Count - 1] : null;
+                        // Русский текст — первый аргумент L.T, L.F и L.Native либо одна из трёх русских форм в L.Plural.
                         bool inPlace = call != null &&
                             (call.Name == "Plural" ? call.Argument >= 1 && call.Argument <= 3 : call.Argument == 0);
                         if (inPlace)
@@ -1608,12 +1610,12 @@ namespace KeyBox.Tests
             return translated;
         }
 
-        /// <summary>Если скобка в позиции open открывает вызов L.T, L.F или L.Plural — имя метода, иначе null.</summary>
+        /// <summary>Если скобка в позиции open открывает вызов L.T, L.F, L.Plural или L.Native — имя метода, иначе null.</summary>
         private static string LocalisationCallName(string text, int open)
         {
             int end = open;
             while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
-            foreach (string name in new[] { "T", "F", "Plural" })
+            foreach (string name in new[] { "T", "F", "Plural", "Native" })
             {
                 string token = "L." + name;
                 int start = end - token.Length;
@@ -1652,6 +1654,69 @@ namespace KeyBox.Tests
         }
 
         // ---------- Прочее ----------
+
+        private static void GeneratorOptions()
+        {
+            // Только цифры.
+            for (int i = 0; i < 100; i++)
+            {
+                string digits = PasswordGenerator.Generate(12, false, false, true, false, false);
+                Check(digits.Length == 12 && System.Text.RegularExpressions.Regex.IsMatch(digits, "^[0-9]{12}$"), "digits only: " + digits);
+            }
+
+            // Без запрета похожих символов используется весь алфавит, с запретом — нет.
+            var all = new HashSet<char>();
+            var clear = new HashSet<char>();
+            for (int i = 0; i < 400; i++)
+            {
+                foreach (char c in PasswordGenerator.Generate(40, true, true, true, false, false)) all.Add(c);
+                foreach (char c in PasswordGenerator.Generate(40, true, true, true, false, true)) clear.Add(c);
+            }
+            Check(all.Count == 62, "letters and digits, nothing else: " + all.Count);
+            foreach (char c in "O0Il1o")
+            {
+                Check(all.Contains(c), "the full alphabet includes " + c);
+                Check(!clear.Contains(c), "look-alikes are left out: " + c);
+            }
+            Check(clear.Count == 56, "the alphabet without look-alikes: " + clear.Count);
+
+            // Каждый выбранный класс представлен, невыбранных нет.
+            for (int i = 0; i < 300; i++)
+            {
+                string password = PasswordGenerator.Generate(6, true, false, true, true, true);
+                bool upper = false, lower = false, digit = false, symbol = false;
+                foreach (char c in password)
+                {
+                    if (char.IsUpper(c)) upper = true;
+                    else if (char.IsLower(c)) lower = true;
+                    else if (char.IsDigit(c)) digit = true;
+                    else symbol = true;
+                }
+                Check(upper && digit && symbol && !lower, "classes of " + password);
+            }
+
+            bool rejected = false;
+            try
+            {
+                PasswordGenerator.Generate(10, false, false, false, false, true);
+            }
+            catch (ArgumentException)
+            {
+                rejected = true;
+            }
+            Check(rejected, "no character class at all is an error");
+
+            rejected = false;
+            try
+            {
+                PasswordGenerator.Generate(3, true, true, true, true, true);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                rejected = true;
+            }
+            Check(rejected, "a password shorter than the number of classes is an error");
+        }
 
         private static void GeneratorProperties()
         {

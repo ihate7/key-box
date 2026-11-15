@@ -97,10 +97,20 @@ namespace KeyBox
 
                 bool locked;
                 using (session)
-                using (var main = new MainForm(session))
                 {
-                    Application.Run(main);
-                    locked = main.LockRequested;
+                    bool reopen;
+                    do
+                    {
+                        // Язык интерфейса — из настроек хранилища; при его смене окно открывается заново.
+                        L.Current = L.FromSetting(session.Data.EffectiveSettings.Language);
+                        using (var main = new MainForm(session))
+                        {
+                            Application.Run(main);
+                            locked = main.LockRequested;
+                            reopen = main.ReopenRequested && !locked;
+                        }
+                    }
+                    while (reopen);
                 }
 
                 // Расшифрованные данные больше не нужны — пусть память освободится сразу.

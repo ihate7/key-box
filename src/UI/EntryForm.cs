@@ -26,6 +26,7 @@ namespace KeyBox.UI
         }
 
         private readonly FormsTimer codeTimer = new FormsTimer();
+        private readonly VaultSettings settings;
         private readonly TextBox txtDescription;
         private readonly TextBox txtUrl;
         private readonly TextBox txtLogin;
@@ -44,6 +45,7 @@ namespace KeyBox.UI
             : base(entry == null ? L.T("Новая запись", "New entry") : L.T("Изменение записи", "Edit entry"), 560)
         {
             Name = "EntryForm";
+            settings = data.EffectiveSettings;
 
             Body.ColumnCount = 2;
             Body.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -170,7 +172,8 @@ namespace KeyBox.UI
 
             var tips = new ToolTip();
             tips.SetToolTip(chkShow, L.T("Показать пароль и ключ", "Show the password and the key"));
-            tips.SetToolTip(btnGenerate, L.F("Случайный пароль из {0} символов", "Random password of {0} characters", PasswordGenerator.DefaultLength));
+            tips.SetToolTip(btnGenerate, L.F("Случайный пароль из {0} символов. Длина и состав задаются в настройках.",
+                "Random password of {0} characters. Its length and character set are chosen in the settings.", settings.PasswordLength));
 
             codeTimer.Interval = 1000;
             codeTimer.Tick += delegate { UpdateCodePreview(); };
@@ -365,7 +368,8 @@ namespace KeyBox.UI
 
         private void OnGenerate(object sender, EventArgs e)
         {
-            txtPassword.Text = PasswordGenerator.Generate(PasswordGenerator.DefaultLength);
+            txtPassword.Text = PasswordGenerator.Generate(settings.PasswordLength, settings.PasswordUpper, settings.PasswordLower,
+                settings.PasswordDigits, settings.PasswordSymbols, settings.PasswordNoLookAlikes);
             chkShow.Checked = true;
             txtPassword.Focus();
             txtPassword.SelectAll();

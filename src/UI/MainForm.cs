@@ -16,6 +16,8 @@ namespace KeyBox.UI
     /// </summary>
     internal sealed class MainForm : BaseForm
     {
+        // Значения по умолчанию. Действующие берутся из настроек хранилища (окно «Настройки»).
+
         /// <summary>Через сколько минут бездействия хранилище блокируется само.</summary>
         public const int AutoLockMinutes = 5;
 
@@ -40,6 +42,7 @@ namespace KeyBox.UI
         private static bool hasSavedBounds;
 
         private readonly VaultSession session;
+        private VaultSettings settings;
         private readonly IdleMonitor idle = new IdleMonitor();
         private readonly FormsTimer tick = new FormsTimer();
         private readonly string passwordMask = new string((char)0x2022, 8);
@@ -100,7 +103,8 @@ namespace KeyBox.UI
         {
             if (session == null) throw new ArgumentNullException("session");
             this.session = session;
-            AutoLockSeconds = AutoLockMinutes * 60;
+            settings = session.Data.EffectiveSettings;
+            AutoLockSeconds = settings.AutoLockMinutes * 60;
 
             Name = "MainForm";
             Text = Program.AppName;
@@ -148,6 +152,12 @@ namespace KeyBox.UI
 
         /// <summary>true, если окно закрылось по блокировке: нужно снова спросить мастер-пароль.</summary>
         public bool LockRequested { get; private set; }
+
+        /// <summary>
+        /// true, если окно закрылось, чтобы тут же открыться заново: сменился язык интерфейса,
+        /// а все надписи создаются при построении окна.
+        /// </summary>
+        public bool ReopenRequested { get; private set; }
 
         /// <summary>Порог автоблокировки в секундах (отдельным свойством — чтобы его могли менять тесты).</summary>
         internal int AutoLockSeconds { get; set; }
@@ -198,9 +208,12 @@ namespace KeyBox.UI
             // добавляются справа налево.
             btnMore = new ToolStripDropDownButton(L.T("Ещё", "More"));
             btnMore.Name = "btnMore";
-            StyleToolItem(btnMore, Ui.GlyphMore, L.T("Смена мастер-пароля, сведения о программе", "Change master password, about the program"), false);
+            StyleToolItem(btnMore, Ui.GlyphMore, L.T("Настройки, смена мастер-пароля, сведения о программе", "Settings, master password, about the program"), false);
             btnMore.Alignment = ToolStripItemAlignment.Right;
             btnMore.ShowDropDownArrow = false;
+            var miSettings = new ToolStripMenuItem(L.T("Настройки…", "Settings…"));
+            miSettings.Name = "miSettings";
+            miSettings.Click += delegate { ShowSettings(); };
             var miChangePassword = new ToolStripMenuItem(L.T("Сменить мастер-пароль…", "Change master password…"));
             miChangePassword.Name = "miChangePassword";
             miChangePassword.Click += delegate { ChangeMasterPassword(); };
@@ -208,6 +221,7 @@ namespace KeyBox.UI
             miAbout.Name = "miAbout";
             miAbout.Click += delegate { ShowAbout(); };
             StyleMenu(btnMore.DropDown);
+            btnMore.DropDownItems.Add(miSettings);
             btnMore.DropDownItems.Add(miChangePassword);
             btnMore.DropDownItems.Add(new ToolStripSeparator());
             btnMore.DropDownItems.Add(miAbout);
@@ -963,7 +977,7 @@ namespace KeyBox.UI
                 flashSeconds--;
                 if (flashSeconds == 0) UpdateStatus();
             }
-            if (idle.IdleSeconds >= AutoLockSeconds)
+            if (settings.AutoLockMinutes > 0 && idle.IdleSeconds >= AutoLockSeconds)
             {
                 RequestLock(false);
             }
@@ -1191,7 +1205,7 @@ namespace KeyBox.UI
             }
 
             bool clear;
-            using (var dialog = new HistoryForm(entry, TitleOf(entry), ClipboardClearSeconds))
+            using (var dialog = new HistoryForm(entry, TitleOf(entry), settings.ClipboardSeconds))
             {
                 dialog.ShowDialog(this);
                 clear = dialog.ClearRequested;
@@ -1229,7 +1243,7 @@ namespace KeyBox.UI
                     : L.T("Логин у этой записи не задан", "This entry has no username"));
                 return;
             }
-            if (!ClipboardGuard.Copy(value, what, ClipboardClearSeconds))
+            if (!ClipboardGuard.Copy(value, what, settings.ClipboardSeconds))
             {
                 Flash(L.T("Не удалось скопировать: буфер обмена занят другой программой", "Could not copy: the clipboard is in use by another program"));
             }
@@ -1257,7 +1271,7 @@ namespace KeyBox.UI
 
             DateTime now = DateTime.UtcNow;
             string code = Totp.Code(key, now);
-            if (!ClipboardGuard.Copy(code, L.T("Код", "Code"), ClipboardClearSeconds))
+            if (!ClipboardGuard.Copy(code, L.T("Код", "Code"), settings.ClipboardSeconds))
             {
                 Flash(L.T("Не удалось скопировать: буфер обмена занят другой программой", "Could not copy: the clipboard is in use by another program"));
                 return;
@@ -1607,27 +1621,65 @@ namespace KeyBox.UI
             Flash(L.T("Мастер-пароль изменён", "Master password changed"));
         }
 
+        /// <summary>Открывает окно настроек и применяет то, что в нём выбрано.</summary>
+        internal void ShowSettings()
+        {
+            VaultSettings updated;
+            using (var dialog = new SettingsForm(settings))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || LockRequested) return;
+                updated = dialog.Settings;
+            }
+            if (!Data.UpdateSettings(updated)) return;
+
+            SaveVault();
+            settings = Data.EffectiveSettings;
+            AutoLockSeconds = settings.AutoLockMinutes * 60;
+            idle.Reset();
+            Flash(L.T("Настройки сохранены", "Settings saved"));
+
+            Language language = L.FromSetting(settings.Language);
+            if (language != L.Current)
+            {
+                // Все надписи окна уже созданы на прежнем языке, поэтому окно открывается заново.
+                L.Current = language;
+                ReopenRequested = true;
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(new MethodInvoker(Close));
+                }
+                else
+                {
+                    Close();
+                }
+            }
+        }
+
         private void ShowAbout()
         {
+            string locking = settings.AutoLockMinutes > 0
+                ? L.F("Блокировка — через {0} мин бездействия, а также при блокировке Windows.",
+                      "Auto-lock after {0} min of inactivity and when Windows is locked.", settings.AutoLockMinutes)
+                : L.T("Блокировка по бездействию выключена; хранилище блокируется при блокировке Windows.",
+                      "Auto-lock on inactivity is off; the vault is locked when Windows is locked.");
+
             string text = L.F(
                 "{0} {1} — портативное хранилище паролей\n\n" +
                 "Файл хранилища:\n{2}\n\n" +
                 "Шифрование: AES-256-GCM. Ключ получается из мастер-пароля функцией PBKDF2-HMAC-SHA512 ({3} итераций).\n\n" +
                 "В хранилище: {4}, {5}.\n\n" +
-                "Блокировка — через {6} мин бездействия, а также при блокировке Windows. " +
-                "Буфер обмена очищается через {7} с после копирования.",
+                "{6} Буфер обмена очищается через {7} с после копирования.",
                 "{0} {1} — a portable password vault\n\n" +
                 "Vault file:\n{2}\n\n" +
                 "Encryption: AES-256-GCM. The key is derived from the master password with PBKDF2-HMAC-SHA512 ({3} iterations).\n\n" +
                 "In the vault: {4}, {5}.\n\n" +
-                "Auto-lock after {6} min of inactivity and when Windows is locked. " +
-                "The clipboard is cleared {7} s after copying.",
+                "{6} The clipboard is cleared {7} s after copying.",
                 Program.AppName, Program.Version,
                 Ui.FitPath(session.FilePath, Ui.Font, MsgBox.TextWidth),
                 session.Iterations.ToString("N0"),
                 L.Plural(Data.Groups.Count, "группа", "группы", "групп", "group", "groups"),
                 L.Plural(Data.LiveCount, "запись", "записи", "записей", "entry", "entries"),
-                AutoLockMinutes, ClipboardClearSeconds);
+                locking, settings.ClipboardSeconds);
             MsgBox.Info(this, L.T("О программе", "About"), text);
         }
 
@@ -1919,7 +1971,7 @@ namespace KeyBox.UI
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (!LockRequested && dirty && e.CloseReason == CloseReason.UserClosing)
+            if (!LockRequested && !ReopenRequested && dirty && e.CloseReason == CloseReason.UserClosing)
             {
                 if (!SaveVault() &&
                     !MsgBox.ConfirmDanger(this, L.T("Выход без сохранения", "Exit without saving"),

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 
 namespace KeyBox.Crypto
@@ -8,27 +9,48 @@ namespace KeyBox.Crypto
     {
         public const int DefaultLength = 20;
 
-        // Без похожих друг на друга символов (O/0, I/l/1), чтобы пароль можно было
+        // Наборы без похожих друг на друга символов (O/0, I/l/1): такой пароль проще
         // при необходимости перепечатать вручную.
-        private const string Upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-        private const string Lower = "abcdefghijkmnpqrstuvwxyz";
-        private const string Digits = "23456789";
+        private const string UpperClear = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+        private const string LowerClear = "abcdefghijkmnpqrstuvwxyz";
+        private const string DigitsClear = "23456789";
+
+        private const string UpperAll = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        private const string LowerAll = "abcdefghijklmnopqrstuvwxyz";
+        private const string DigitsAll = "0123456789";
+
         private const string Symbols = "!@#$%^&*-_=+?";
 
+        /// <summary>Пароль из букв обоих регистров, цифр и знаков, без похожих символов.</summary>
         public static string Generate(int length)
         {
-            if (length < 4) throw new ArgumentOutOfRangeException("length");
+            return Generate(length, true, true, true, true, true);
+        }
 
-            string all = Upper + Lower + Digits + Symbols;
+        /// <summary>
+        /// Пароль заданной длины из выбранных классов символов. Каждый выбранный класс
+        /// обязательно представлен хотя бы одним символом.
+        /// </summary>
+        public static string Generate(int length, bool upper, bool lower, bool digits, bool symbols, bool noLookAlikes)
+        {
+            var classes = new List<string>();
+            if (upper) classes.Add(noLookAlikes ? UpperClear : UpperAll);
+            if (lower) classes.Add(noLookAlikes ? LowerClear : LowerAll);
+            if (digits) classes.Add(noLookAlikes ? DigitsClear : DigitsAll);
+            if (symbols) classes.Add(Symbols);
+            if (classes.Count == 0) throw new ArgumentException("At least one character class is required.");
+            if (length < classes.Count) throw new ArgumentOutOfRangeException("length");
+
+            string all = string.Concat(classes.ToArray());
             char[] chars = new char[length];
             using (var rng = new RNGCryptoServiceProvider())
             {
                 // По одному символу каждого класса, остальные — из общего алфавита.
-                chars[0] = Pick(rng, Upper);
-                chars[1] = Pick(rng, Lower);
-                chars[2] = Pick(rng, Digits);
-                chars[3] = Pick(rng, Symbols);
-                for (int i = 4; i < length; i++)
+                for (int i = 0; i < classes.Count; i++)
+                {
+                    chars[i] = Pick(rng, classes[i]);
+                }
+                for (int i = classes.Count; i < length; i++)
                 {
                     chars[i] = Pick(rng, all);
                 }
